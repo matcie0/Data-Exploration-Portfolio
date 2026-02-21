@@ -41,7 +41,26 @@ Projekt koncentruje się na zaawansowanych metodach uczenia nienadzorowanego, ma
   * Wykorzystanie wykresów Sheparda i kryterium STRESS*do oceny jakości odwzorowania odległości.
 
 
+## Sprawozdanie 3: Klasyfikacja Nadzorowana 
+
+Projekt skupia się na praktycznym zastosowaniu algorytmów klasyfikacji oraz zaawansowanych metodach oceny ich dokładności. Głównym celem było porównanie skuteczności modeli w rozpoznawaniu wzorców oraz walka z problemem maskowania klas.
+
+**[Pobierz pełne Sprawozdanie w PDF](./Supervised-Learning-Classification/Sprawozdanie3.pdf)**
+
+#### Zakres analizy:
+
+* **Rozszerzona Przestrzeń Cech - Zbiór Iris (Autor: [Dawid](https://github.com/DawidSkowronski)):**
+  * Konstrukcja klasyfikatora opartego na regresji liniowej.
+  * Konstrukcja modelu liniowego dla rozszerzonej przestrzeni cech.
+
+
+* **Modelowanie i Optymalizacja - Zbiór Vehicle (Autorzy: Mateusz Cieślak i [Dawid](https://github.com/DawidSkowronski)):**
+  * Porównanie trzech metod: **k-NN**, **Naiwny Klasyfikator Bayesowski** oraz **Drzewa Klasyfikacyjne**.
+  * Próba zwiększenia dokładności poprzez zastosowanie różnych parametrów i podzbiorów cech.
+  
+
 
 ####  Narzędzia:
+`caret` (walidacja krzyżowa, bootstrap .632+), `rpart` (drzewa)
 `cmdscale` (MDS), `prcomp` (PCA), `plotly`
 `R`, `ggplot2`, `dplyr`, `RMarkdown`
