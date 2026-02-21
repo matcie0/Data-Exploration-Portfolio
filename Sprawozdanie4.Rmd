@@ -1,0 +1,1774 @@
+---
+title: "Sprawozdanie z listy nr 4"
+author: "Mateusz Cieślak, Dawid Skowroński"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    number_sections: true
+  word_document: default
+  html_document:
+    df_print: paged
+subtitle: Eksploracja Danych
+toc: true
+lof: true
+lot: true
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{float}
+- \usepackage{graphicx}
+- \usepackage[OT4]{polski}
+- \usepackage[utf8]{inputenc}
+- \usepackage{amsmath}
+- \usepackage{rotating}
+- \renewcommand{\contentsname}{Spis treści}
+- \renewcommand{\listfigurename}{Spis wykresów}
+- \renewcommand{\listtablename}{Spis tabel}
+- \renewcommand{\figurename}{Wykres}
+- \renewcommand{\tablename}{Tabela}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  fig.width = 6,
+  fig.height = 3,
+  out.extra='',
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE)
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "", fig.align = "center", set.seed(123))
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE)
+```
+
+```{r biblioteki}
+library(tinytex)
+library(knitr)
+library(patchwork)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(gridExtra)
+library(xtable)
+library(kableExtra)
+library(mlbench)
+library(purrr)
+library(ggpubr)
+library(class)
+library(reshape2)
+library(e1071)
+library(rpart)
+library(ggtext)
+library(rpart.plot)
+library(ipred)
+library(randomForest)
+library(DataExplorer)
+library(FSelectorRcpp)
+library(stats)
+library(cluster)
+library(factoextra)
+library(mclust)
+library(clValid)
+library(GGally)
+library(NbClust)
+```
+
+# Zadanie 1
+
+
+## Ensemble learning
+
+W tej sekcji zastosujemy zaawansowane metody klasyfikacji – tzw. metody **ensemble learning**, takie jak **bagging**, **boosting** i **random forest**. Jest to kontynuacja analizy zbioru danych `Vehicle`, który wybraliśmy w poprzednim sprawozdaniu.
+
+
+```{r wczytanie i standaryzacja danych Vehicle}
+data("Vehicle")
+Vehicle_scaled <- as.data.frame(scale(Vehicle[, -which(names(Vehicle) == "Class")]))
+Vehicle_scaled$Class <- Vehicle$Class
+
+```
+
+### Rozkład klas
+```{r rozkład klas Vehicle, fig.cap = "\\label{fig:rozklad_klas_Vehicle}Wykres słupkowy przedstawiający liczbę obserwacji dla poszczególnej klasy"}
+barplot(prop.table(table(Vehicle_scaled$Class)), col=1:9, main="Dane Vehicle_scaled - rozkład klas")
+grid()
+```
+
+Przypominamy, że klasy w zbiorze Vehicle są równomiernie rozłożone (wykres \ref{fig:rozklad_klas_Vehicle}) i nie zawiera on wartości NA (suma NA = `r sum(is.na(Vehicle))`). Ponadto jest w nim jedna zmienna typu factor "Class", która zawiera informacje o przynależności do jednej spośród czterech klas: bus, opel, saab, van. Pozostałe 18 to zmienne numeryczne.
+
+### PCA w 2D czyli wstępna eksploracja danych
+
+Aby uzyskać intuicyjne wyobrażenie o strukturze danych i separowalności klas, przeprowadzamy analizę głównych składowych (PCA).
+
+```{r pca}
+Vehicle.pca <- prcomp(Vehicle_scaled[,-19], center=T, scale=T)
+summary(Vehicle.pca)
+```
+
+Pierwsze dwie składowe wyjaśniają 69% wariancji, więc dane można wstępnie dobrze zobrazować na płaszczyźnie 2D.
+
+
+```{r pca Vehicle, fig.height=4.5, fig.cap = "\\label{fig:PCA_Vehicle}Wstępna analiza odseparowania klas z użyciem PCA 2D"}
+
+plot(Vehicle.pca$x[,1:2], col=Vehicle_scaled$Class, main="Dane Vehicle_scaled - wykres na bazie PCA", pch=15, cex=0.7)
+legend("topright", col=1:4, legend=levels(Vehicle_scaled$Class), pch=15, bg="azure2")
+```
+
+Możemy zauważyć, że nawet po wykonaniu PCA (wykres \ref{fig:PCA_Vehicle}) klasy są bardzo słabo odseparowane, może to sugerować, że klasyfikacja będzie trudna.
+
+
+### Pojedyncze drzewo klasyfikacyjne
+
+Na początek zastosujemy klasyczny model pojedynczego drzewa decyzyjnego jako klasyfikator bazowy, który posłuży jako punkt odniesienia przy ocenie skuteczności bardziej zaawansowanych metod ensemble learning.
+
+```{r drzewo klasyfikacyjne, fig.height=5.5, fig.cap = "\\label{fig:pojedyncze_drzewo}Pojedyncze drzewo klasyfikacyjne"}
+tree <- rpart(Class~., data=Vehicle_scaled) #parametry domyślne
+rpart.plot(tree, main="Drzewo klasyfikacyjne - dane Vehicle", cex=.5, type = 4,
+           extra = 103,
+           nn = TRUE,
+           tweak = 1.3)
+
+mypredict.rpart <- function(object, newdata)  predict(object, newdata=newdata, type="class")
+error.tree <- (errorest(Class~., data=Vehicle_scaled, model=rpart, predict=mypredict.rpart,
+                                 estimator="632plus", est.para=control.errorest(nboot = 20)))
+```
+
+
+Błąd dla pojedynczego drzewa klasyfikacyjnego (obliczony metodą 632plus) wynosi `r round(100*error.tree$error, 1)`%.
+
+### Algorytm bagging
+
+Bagging (skrót od Bootstrap Aggregating) to metoda zespołowa polegająca na tworzeniu wielu klasyfikatorów bazowych (np. drzew decyzyjnych) uczonych na losowanych ze zwracaniem podzbiorach danych treningowych. Ostateczna predykcja powstaje poprzez głosowanie większościowe (dla klasyfikacji). Celem tej sekcji jest zbadanie, jak liczba drzew wpływa na błąd klasyfikacji, oraz porównanie skuteczności baggingu z klasyfikacją opartą na pojedynczym drzewie.
+
+```{r algorytm bagging, fig.height=4, fig.cap = "\\label{fig:algorytm_bagging}Wykres przedstawiający zależność błędu od liczby replikacji B"}
+btree <- bagging(
+  Class ~ .,
+  data = Vehicle_scaled,
+  nbagg = 25,
+  minsplit = 1,
+  cp = 0
+)
+
+# Jak liczba replikacji B (parametr nbagg) wpływa na dokładność modelu?
+B.vector <- c(1, 5, 10, 20, 30, 40, 50, 100)
+bagging.error.rates <- sapply(B.vector, function(b)  {
+  errorest(
+    Class ~ .,
+    data = Vehicle_scaled,
+    model = bagging,
+    nbagg = b,
+    estimator = "632plus",
+    est.para = control.errorest(nboot = 10)
+  )$error
+})
+plot(
+  B.vector,
+  bagging.error.rates,
+  xlab = "B",
+  main = "Bagging: error rate vs. B",
+  type = "b"
+)
+grid()
+
+error.bagging <- (
+  errorest(
+    Class ~ .,
+    data = Vehicle_scaled,
+    model = bagging,
+    model.args = list(nbagg = 20),
+    estimator = "632plus",
+    est.para = control.errorest(nboot = 20)
+  )
+)
+
+
+```
+
+Wykres \ref{fig:algorytm_bagging} pozwala zauważyć, że dla około 20 replikacji błąd znacząco się zmniejsza.
+
+Błąd klasyfikacji dla B = 20 uzyskany metodą 632plus wynosi `r round(100*error.bagging$error,1)`%.
+
+### Random forest
+
+Random Forest (las losowy) to jedna z najskuteczniejszych metod klasyfikacji opartych na drzewach decyzyjnych. Polega na budowie wielu drzew decyzyjnych na losowych próbkach danych oraz losowych podzbiorach zmiennych przy każdym podziale. Predykcja końcowa opiera się na głosowaniu większościowym (dla klasyfikacji) lub uśrednianiu (dla regresji). Dzięki losowości i agregacji wielu modeli, Random Forest jest metodą odporną na przeuczenie i charakteryzuje się wysoką skutecznością, nawet bez specjalnego dostrajania hiperparametrów.
+
+
+Najpierw zaczniemy od sprawdzenia błędu dla parametru `ntree = 1`.
+
+```{r random forest 1, fig.cap = "\\label{fig:n1}Macierz pomyłek dla parametru ntree = 1"}
+# liczba cech
+p <-  ncol(Vehicle_scaled) - 1
+
+# różne parametry  (ntree - liczba drzew, mtry - liczba wybieranych losowo cech)
+rf.1 <- randomForest(Class~., data=Vehicle_scaled, ntree=1, mtry=p, importance=TRUE)
+
+# prognozowane klasy
+pred.labels <- predict(rf.1, newdata=Vehicle_scaled, type="class")
+real.labels <- Vehicle_scaled$Class
+confusion.matrix <- table(pred.labels, real.labels) # dla zbioru uczącego
+
+df <- as.data.frame(confusion.matrix)
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y 
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze uczącym ntree=1", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+
+```
+
+```{r random forest 1 OOB, fig.cap = "\\label{fig:n1oob}Macierz pomyłek dla parametru ntree = 1 na bazie OOB"}
+confusion.matrix <- rf.1$confusion[, -ncol(rf.1$confusion)] # dla out of bag
+
+df <- as.data.frame(as.table(confusion.matrix))
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y 
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na bazie OOB ntree=1", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+```
+
+Szacowany błąd na bazie out of bag: `r round(rf.1$err.rate[rf.1$ntree, "OOB"] * 100, 2)`%.
+
+Różnica nie jest znacząca w porównaniu z pojedynczym drzewem klasyfikacyjnym, ponieważ w zasadzie tutaj również testujemy pojedyncze drzewo.
+
+
+Sprawdźmy teraz czy wybierając `ntree = 100` poprawimy wynik.
+
+```{r random forest 100,, fig.cap = "\\label{fig:n100}Macierz pomyłek dla parametru ntree = 100"}
+rf.2 <- randomForest(Class~., data=Vehicle_scaled, ntree=100, mtry=sqrt(p), importance=TRUE)
+  
+# prognozowane klasy
+pred.labels <- predict(rf.2, newdata=Vehicle_scaled, type="class")
+real.labels <- Vehicle_scaled$Class
+confusion.matrix <- table(pred.labels, real.labels) # dla zbioru uczącego
+
+df <- as.data.frame(confusion.matrix)
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y 
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze uczącym ntree=100", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+```
+
+Jak widać na wykresie \ref{fig:n100} model perfekcyjnie dopasował się do zbioru uczącego, ale to oznacza przeuczenie.
+
+```{r random forest 100 OOB, fig.cap = "\\label{fig:n100oob}Macierz pomyłek dla parametru ntree = 100 na bazie OOB"}
+confusion.matrix <- rf.2$confusion[, -ncol(rf.2$confusion)] # dla out of bag
+
+df <- as.data.frame(as.table(confusion.matrix))
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y 
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na bazie OOB ntree=100", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+```
+
+Szacowany błąd na bazie out of bag: `r round(rf.2$err.rate[rf.2$ntree, "OOB"] * 100, 2)`  %.
+
+Róźnica dla `ntree = 100` wynosi około `r round( 100*(rf.1$err.rate[rf.1$ntree, "OOB"] - rf.2$err.rate[rf.2$ntree, "OOB"]), 2)` punktów procentowych względem `ntree = 1`.
+
+```{r wykres błędu klasyfikacji, fig.cap = "\\label{fig:error_n100_oob}Wykres przedstawiający błąd klasyfikacji na podstawie OOB w zależności od liczby drzew"}
+
+# Wyciągamy dane o błędach OOB z rf.2
+oob_error_data <- data.frame(
+  Trees = 1:length(rf.2$err.rate[,1]),
+  OOB_Error = rf.2$err.rate[, "OOB"]
+)
+
+# Rysujemy ładny wykres ggplot
+ggplot(oob_error_data, aes(x = Trees, y = OOB_Error)) +
+  geom_line(color = "gray", size = 1.2) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(
+    title = "Out-Of-Bag Error Rate vs. Number of Trees",
+    x = "Number of Trees",
+    y = "OOB Error Rate"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+
+```
+
+Na podstawie wykresu \ref{fig:error_n100_oob} widzimy, że już dla około 30-50 drzew błąd jest bardzo niski i większa liczba drzew niekoniecznie go poprawia.
+
+
+Spójrzmy, które cechy są kluczowe dla naszego modelu.
+
+```{r ranking cech, fig.height=4.5, fig.cap = "\\label{fig:importance}Ważność cech dla modelu ntree=100" }
+# Ranking ważności cech
+
+# Przygotuj dane dla obu miar
+df <- data.frame(
+  Feature = rownames(rf.2$importance),
+  MeanDecreaseAccuracy = rf.2$importance[, "MeanDecreaseAccuracy"],
+  MeanDecreaseGini = rf.2$importance[, "MeanDecreaseGini"]
+)
+
+# Funkcja do tworzenia wykresu dla danej kolumny importance
+plot_importance <- function(data, importance_col, title) {
+  data <- data %>%
+    arrange(desc(.data[[importance_col]])) %>%
+    mutate(Feature = factor(Feature, levels = rev(Feature)))  # odwrócenie osi Y
+  
+  ggplot(data, aes(x = .data[[importance_col]], y = Feature)) +
+    geom_col(fill = "steelblue") +
+    labs(title = title,
+         x = importance_col,
+         y = "Feature") +
+    theme_minimal() +
+    theme(axis.text=element_text(size=12),
+          axis.title=element_text(size=11,face="bold"),
+          plot.title=element_text(size=13,face="bold",hjust=0.5))
+}
+
+p1 <- plot_importance(df, "MeanDecreaseAccuracy", "Mean Decrease Accuracy")
+p2 <- plot_importance(df, "MeanDecreaseGini", "Mean Decrease Gini")
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+Zauważamy, że `Max.L.Ra`, `Sc.Var.maxis` i `Elong` to najważniejsze cechy w tym modelu random forest. Wracając do wykresu \ref{fig:pojedyncze_drzewo} możemy dodatkowo zauważyć, że dla pojedynczego drzewa ważne były podobne cechy.  
+
+Spójrzmy ile wynosi błąd testowany metodą 632plus, ponieważ może się on róźnić od błędów na bazie out of bag.
+
+```{r error random forest}
+error.randomForest <- (errorest(Class~., data=Vehicle_scaled, model=randomForest, model.args = list(ntree = 100),
+                                 estimator="632plus", est.para=control.errorest(nboot = 20)))
+```
+
+Błąd dla metody random forest (`n=100`) sprawdzany metodą 632plus: `r round(100*error.randomForest$error,2)`%.
+
+Jest on jeszcze niższy niż błąd na bazie out of bag.
+
+
+### Podsumowanie dokładności metod (metoda .632+) 
+
+* Błąd dla pojedynczego drzewa: `r round(100*error.tree$error,2)`%
+* Błąd dla metody bagging: `r round(100*error.bagging$error,2)`%
+* Błąd dla metody random forest: `r round(100*error.randomForest$error,2)`%
+
+Względna redukcja błędu klasyfikacji (w %) w porównaniu z pojedynczym drzewem
+
+bagging vs. single tree: `r round((error.tree$error - error.bagging$error)/error.tree$error*100,2)   `   
+random forest vs. single tree: `r round((error.tree$error - error.randomForest$error)/error.tree$error*100,2) ` 
+
+
+
+Przypomnijmy błędy uzyskane prostszymi metodami w poprzednim raporcie:
+
+* Metoda `k-NN`: około 25%
+* Drzewo klasyfikacyjne: około 32%
+* Naive Bayes: około 54 %
+
+
+
+**Wnioski**
+
+* W poprzednim raporcie najskuteczniejsza okazała się metoda `k-NN`, której błąd wynosił około 25%, jednakże używając bardziej zaawansowanych metod takich jak random forest zmniejszyliśmy go do zaledwie `r round(100*error.randomForest$error,2)`% co jest znacznie niższym wynikiem.
+
+* Błąd uzyskany metodą random forest jest również znacznie niższy od błędu na pojedynczym drzewie.
+
+* Różnica pomiędzy różnymi metodami konstrukcji klasyfikatorów złożonych nie jest już tak duża, ale zazwyczaj random forest daje mniejszy błąd niż bagging.
+
+
+
+
+
+## Metoda wektorów nośnych (SVM)
+
+Support Vector Machines (SVM) to jedna z najskuteczniejszych metod klasyfikacji, szczególnie dobrze sprawdzająca się w zadaniach z danymi o wysokim wymiarze. Kluczową rolę w działaniu SVM odgrywa funkcja jądrowa (kernel), która pozwala modelowi odwzorować dane do przestrzeni wyższych wymiarów, umożliwiając liniową separację nawet nieliniowych zbiorów danych. W niniejszym zadaniu zbadamy wpływ rodzaju funkcji jądrowej (liniowej, wielomianowej i radialnej) oraz parametru kosztu C na skuteczność klasyfikatora.
+
+
+```{r podział zbioru}
+data("Vehicle")
+Vehicle_scaled <- as.data.frame(scale(Vehicle[, -which(names(Vehicle) == "Class")]))
+Vehicle_scaled$Class <- Vehicle$Class
+
+dane <- Vehicle_scaled
+
+n <- nrow(dane)
+learn.ind    <- sample(1:n, 2/3*n)
+training.set <- dane[learn.ind,]
+test.set     <- dane[-learn.ind,]
+
+```
+
+### Jądro liniowe dla różnych wartości parametru kosztu
+
+Sprawdzimy jak zachowuje się procent predykcji poprawnie dokonanych przez model i jak zachowuje się błąd wyliczony metodą 632plus przy różnym parametrze kosztu `c`.
+
+```{r c0.1}
+
+# konstrukcja prognoz i ocena ich dokładności
+real.labels <- test.set$Class
+n.test <- length(real.labels)
+
+
+mypredict.svm <- function(object, newdata) {
+  predict(object, newdata = newdata)
+}
+
+svm.linear.C0.1 <- svm(Class ~ ., data = dane, kernel = "linear", cost = 0.1)
+
+pred.svm.lin <- predict(svm.linear.C0.1, newdata=test.set)
+acc.svm.lin.C0.1   <- sum(diag(table(pred.svm.lin, real.labels)))/n.test
+
+
+error.svm.linear.C0.1 <- errorest(Class ~ ., data = dane,
+                                  model = svm,
+                                  predict = mypredict.svm,
+                                  model.args = list(kernel = "linear", cost = 0.1),
+                                  estimator = "632plus",
+                                  est.para = control.errorest(nboot = 50))
+```
+
+
+```{r c1}
+svm.linear.C1 <- svm(Class ~ ., data = dane, kernel = "linear", cost = 1)
+
+pred.svm.lin <- predict(svm.linear.C1, newdata=test.set)
+acc.svm.lin.C1   <- sum(diag(table(pred.svm.lin, real.labels)))/n.test
+
+
+error.svm.linear.C1 <- errorest(Class ~ ., data = dane,
+                                model = svm,
+                                predict = mypredict.svm,
+                                model.args = list(kernel = "linear", cost = 1),
+                                estimator = "632plus",
+                                est.para = control.errorest(nboot = 50))
+
+```
+
+
+```{r c10}
+svm.linear.C10 <- svm(Class ~ ., data = dane, kernel = "linear", cost = 10)
+
+pred.svm.lin <- predict(svm.linear.C10, newdata=test.set)
+acc.svm.lin.C10   <- sum(diag(table(pred.svm.lin, real.labels)))/n.test
+
+
+error.svm.linear.C10 <- errorest(Class ~ ., data = dane,
+                                 model = svm,
+                                 predict = mypredict.svm,
+                                 model.args = list(kernel = "linear", cost = 10),
+                                 estimator = "632plus",
+                                 est.para = control.errorest(nboot = 50))
+
+
+```
+
+
+```{r svm-results-clean-names, echo=FALSE}
+library(knitr)
+
+# Tworzymy ramkę danych z estetycznymi nagłówkami kolumn — i nie pozwalamy R ich zmieniać
+svm_results <- data.frame(
+  Metryka = c("Accuracy [%]", "Błąd .632+ [%]"),
+  "c = 0.1" = c(
+    round(100 * acc.svm.lin.C0.1, 2),
+    round(100 * error.svm.linear.C0.1$error, 2)
+  ),
+  "c = 1" = c(
+    round(100 * acc.svm.lin.C1, 2),
+    round(100 * error.svm.linear.C1$error, 2)
+  ),
+  "c = 10" = c(
+    round(100 * acc.svm.lin.C10, 2),
+    round(100 * error.svm.linear.C10$error, 2)
+  ),
+  check.names = FALSE  
+)
+
+kable(svm_results, caption = "Porównanie metryk dla SVM z kernelem liniowym przy różnych wartościach c")
+```
+
+
+Accuracy zwiększyło się dla parametru `c = 1` i `c = 10` względem `c = 0.1`, natomiast błąd obliczany metodą 632plus jest podobny dla wszystkich `c`.
+
+
+
+
+### Porównanie wyników dla różnych stopni jąder wielomianowych
+
+```{r poly i radial}
+
+svm.poly2  <- svm(Class~., data=training.set, kernel="polynomial", degree = 2)
+error.svm.poly2 <- errorest(Class ~ ., data = dane,
+                                 model = svm,
+                                 predict = mypredict.svm,
+                                 model.args = list(kernel = "polynomial"),
+                                 estimator = "632plus",
+                                 est.para = control.errorest(nboot = 50))
+
+
+svm.poly4  <- svm(Class~., data=training.set, kernel="polynomial", degree = 4)
+error.svm.poly4 <- errorest(Class ~ ., data = dane,
+                                 model = svm,
+                                 predict = mypredict.svm,
+                                 model.args = list(kernel = "polynomial"),
+                                 estimator = "632plus",
+                                 est.para = control.errorest(nboot = 50))
+
+svm.radial <- svm(Class~., data=training.set, kernel="radial")
+error.svm.radial <- errorest(Class ~ ., data = dane,
+                                 model = svm,
+                                 predict = mypredict.svm,
+                                 model.args = list(kernel = "radial"),
+                                 estimator = "632plus",
+                                 est.para = control.errorest(nboot = 50))
+
+svm.radial.gamma0.1 <- svm(Class~., data=training.set, kernel="radial", gamma=0.1)
+error.svm.gamma0.1 <- errorest(Class ~ ., data = dane,
+                                 model = svm,
+                                 predict = mypredict.svm,
+                                 model.args = list(kernel = "radial", gamma=0.1),
+                                 estimator = "632plus",
+                                 est.para = control.errorest(nboot = 50))
+
+svm.radial.gamma1 <- svm(Class~., data=training.set, kernel="radial", gamma=1)
+error.svm.gamma1 <- errorest(Class ~ ., data = dane,
+                                 model = svm,
+                                 predict = mypredict.svm,
+                                 model.args = list(kernel = "radial", gamma=1),
+                                 estimator = "632plus",
+                                 est.para = control.errorest(nboot = 50))
+
+# Obszary decyzyjne dla różnych f-cji jądrowych
+
+# prognozy i porównanie dokładności
+pred.svm.poly2  <- predict(svm.poly2, newdata=test.set)
+pred.svm.poly4  <- predict(svm.poly4, newdata=test.set)
+pred.svm.radial <- predict(svm.radial, newdata=test.set)
+pred.svm.radial.gamma0.1 <- predict(svm.radial.gamma0.1, newdata=test.set)
+pred.svm.radial.gamma1 <- predict(svm.radial.gamma1, newdata=test.set)
+
+
+acc.svm.lin    <- sum(diag(table(pred.svm.lin, real.labels)))/n.test
+
+acc.svm.poly2  <- sum(diag(table(pred.svm.poly2, real.labels)))/n.test
+acc.svm.poly4  <- sum(diag(table(pred.svm.poly4, real.labels)))/n.test
+acc.svm.radial <- sum(diag(table(pred.svm.radial, real.labels)))/n.test
+acc.svm.radial.gamma0.1 <- sum(diag(table(pred.svm.radial.gamma0.1, real.labels)))/n.test
+acc.svm.radial.gamma1 <- sum(diag(table(pred.svm.radial.gamma1, real.labels)))/n.test
+```
+
+
+
+```{r svm-poly-table, echo=FALSE}
+library(knitr)
+
+svm_poly <- data.frame(
+  Metryka = c("Accuracy [%]", "Błąd .632+ [%]"),
+  "stopień = 2" = c(
+    round(100 * acc.svm.poly2, 2),
+    round(100 * error.svm.poly2$error, 2)
+  ),
+  "stopień = 4" = c(
+    round(100 * acc.svm.poly4, 2),
+    round(100 * error.svm.poly4$error, 2)
+  ),
+  check.names = FALSE
+)
+
+kable(svm_poly, caption = "Porównanie metryk SVM z kernelem wielomianowym (różne stopnie)")
+```
+
+Zwiększenie stopnia wielomianu pogorszyło accuracy, ale błąd uzyskany metodą 632plus wciąż jest podobny.
+
+### Porównanie wyników dla różnych parametrów gamma jądra radialnego
+
+```{r svm-radial-table, echo=FALSE}
+svm_radial <- data.frame(
+  Metryka = c("Accuracy [%]", "Błąd .632+ [%]"),
+  "gamma domyślna" = c(
+    round(100 * acc.svm.radial, 2),
+    round(100 * error.svm.radial$error, 2)
+  ),
+  "gamma = 0.1" = c(
+    round(100 * acc.svm.radial.gamma0.1, 2),
+    round(100 * error.svm.gamma0.1$error, 2)
+  ),
+  "gamma = 1" = c(
+    round(100 * acc.svm.radial.gamma1, 2),
+    round(100 * error.svm.gamma1$error, 2)
+  ),
+  check.names = FALSE
+)
+
+kable(svm_radial, caption = "Porównanie metryk SVM z kernelem radialnym (różne gamma)")
+```
+
+Najwyższe accuracy otrzymujemy dla domyślnej gammy.
+
+**Podsumowanie**
+
+* Wyniki otrzymane za pomocą sprawdzenia procentu poprawnych predykcji (accuracy) są najlepsze dla jądra liniowego, ale błędy klasyfikacji uzyskane metodą 632plus są podobne we wszystkich modelach. 
+
+* Na accuracy najbardziej wpływa wybór funkcji jądrowej, ale dobranie odpowiedniego parametru takiego jak cost, stopień wielomianu i gamma mogą ją zauważalnie poprawić lub pogorszyć.
+
+
+
+### Dostrajanie parametrów
+
+Dobierzemy teraz optymalne parametry `c` i `gamma` dla jądra radialnego, tak model był jak najbardziej skuteczny.
+
+```{r dostrajanie-svm, echo=FALSE, message=FALSE, warning=FALSE}
+library(e1071)
+library(ipred)
+library(kernlab)
+
+# Zakresy parametrów
+C.range <- 2^((-4):4)
+gamma.range <- 2^((-8):4)
+
+train.x <- training.set[, -which(names(training.set) == "Class")]
+train.y <- training.set$Class
+
+# Strojenie SVM z jądrem radialnym
+radial.tune <- tune(svm,
+                    train.x = train.x, train.y = train.y,
+                    kernel = "radial",
+                    ranges = list(cost = C.range, gamma = gamma.range))
+
+# Wyciągamy najlepsze parametry
+C.best <- radial.tune$best.parameters[["cost"]]
+gamma.best <- radial.tune$best.parameters[["gamma"]]
+```
+
+
+**Najlepsze parametry:**
+
+* cost (c) = `r C.best`
+
+* gamma = `r gamma.best`
+
+```{r plot-tune, echo=FALSE, fig.cap = "\\label{fig:radial_tune}Wykres przedstawiający accuracy SMV z jądrem radialnym w zależności od gammy i costu"}
+# Tylko jeden estetyczny wykres
+plot(radial.tune, transform.x = log, transform.y = log, color.palette = topo.colors)
+```
+
+```{r model-i-ocena, echo=FALSE}
+# Dopasowanie końcowego modelu
+svm.radial.tuned <- svm(Class ~ ., data = training.set,
+                        kernel = "radial",
+                        cost = C.best, gamma = gamma.best)
+
+# Predykcja
+pred.svm.radial.tuned <- predict(svm.radial.tuned, newdata = test.set)
+acc.svm.radial.tuned <- mean(pred.svm.radial.tuned == test.set$Class)
+
+# Błąd 0.632+
+svm.radial.wrapper <- function(formula, data, ...) {
+  svm(formula, data = data, kernel = "radial", cost = C.best, gamma = gamma.best, ...)
+}
+
+error632plus.radial <- errorest(Class ~ ., data = dane,
+                                model = svm.radial.wrapper,
+                                est.632plus = TRUE)
+```
+
+
+```{r podstawowy-i-ulepszony-radial}
+library(knitr)
+
+# Dane w formacie oryginalnym
+results_table <- data.frame(
+  Model = c("SVM radial domyślne", "SVM radial optymalne"),
+  Accuracy = c(
+    round(100 * acc.svm.radial, 2),
+    round(100 * acc.svm.radial.tuned, 2)
+  ),
+  Error_632plus = c(
+    round(100 * error.svm.radial$error, 2),
+    round(100 * error632plus.radial$error, 2)
+  )
+)
+
+# Transpozycja: zamiana na macierz, potem transpozycja i konwersja na data.frame
+results_table_t <- as.data.frame(t(results_table[,-1]))
+colnames(results_table_t) <- results_table$Model
+results_table_t <- cbind(Metryka = rownames(results_table_t), results_table_t)
+rownames(results_table_t) <- NULL
+
+# Zmiana nazw wierszy na czytelne
+results_table_t$Metryka <- c("Accuracy [%]", "Błąd .632+ [%]")
+
+kable(results_table_t, caption = "Porównanie dokładności i błędu .632+ dla modelu SVM radialnego (transponowane)")
+
+```
+
+
+Optymalnie dobrane parametry poprawiły nie tylko accuracy, ale również błąd obliczany metodą 632plus co jest zaskakujące, ponieważ w poprzednich testach wybór jądra i parametrów nie wpływał znacznie na błąd obliczany tą metodą, a teraz udało się go znacznie zmniejszyć. 
+
+
+## Porównanie skuteczności metod
+
+
+W algorytmach ensemble learning najskuteczniejszy okazał się random forest (`r round(100*error.randomForest$error,2)`%). Spośrod metod SVM największe accuracy uzyskał kernel liniowy z `c = 10`, natomiast ta miara może być myląca, ponieważ wynik mógł być przypadkowy z powodu wyboru konkretnego zbioru.
+Biorąc pod uwagę metodę 632plus w SVM najskuteczniejszy jest klasyfikator z jądrem radialnym, który jest odpowiednio dostrojony. To on jest najskuteczniejszy ze wszystkich metod stosowanych do klasyfikacji w tym jak i poprzednim sprawozdaniu. Jego błąd wyznaczony metodą 632plus wynosi zaledwie `r round(100 * error632plus.radial$error, 2)`% co jest znaczą poprawą w stosunku do najlepszego `k-NN` z poprzedniego raportu (około 25%) i najlepszego random forest z poprzedniego podpunktu (`r round(100*error.randomForest$error,2)`%). Zatem dla zbioru Vehicle najskutecznejszy okazał się odpowiednio dostrojony SVM z jądrem radialnym.
+ 
+ 
+ 
+ 
+# Zadanie 2
+
+W tym zadaniu zastosujemy algorytmy klasteryzacji (grupujące i hierarchiczne) aby odkryć potencjalne ukryte wzorce w danych oraz ich prawdziwą strukturę. Głównym celem jest porównanie metod analizy skupień w kontekście ich skuteczności w grupowaniu danych. Dodatkowo, ocenimy jakość grupowania za pomocą wskaźników wewnętrznych oraz zewnętrznych.
+
+## Wybór i przygotowanie danych
+
+Kontynuujemy pracę ze zbiorem `Vehicle` z pakietu `mlbench`. Zbiór ten zawiera `r dim(Vehicle)[1]` obserwacji, więc w celu zmniejszenia ilości obliczeń i bardziej przejrzystej wizualizacji, wybieramy losowo podzbiór zawierający **200** wierszy.
+
+```{r wylosowanie_podzbioru_Vehicle, echo = TRUE}
+set.seed(1025)
+Vehicle_podzbior <- Vehicle[sample(nrow(Vehicle),size = 200),]
+```
+
+Z racji tego, że analiza skupień jest przykładem uczenia nienadzorowanego, musimy usunąć kolumnę zawierającą etykietki klas ze zbioru `Vehicle_podzbior`.
+
+```{r usuwanie_etykiet_klas, echo = TRUE}
+Vehicle_etykiety <- Vehicle_podzbior$Class
+Vehicle_dane <- Vehicle_podzbior[,-ncol(Vehicle_podzbior)]
+```
+
+### Potrzeba standaryzacji
+
+Algorytmy jak **k-means** czy **PAM** są oparte na odległościach między obserwacjami. Dane `Vehicle` zawierają cechy o różnych jednostkach i w różnych skalach. Dlatego standaryzacja jest zalecana, ponieważ spowoduje ona jednakowy wkład zmiennych do metod. Może ona jednak pogorszyć separację klas i wpłynąć negatywnie na skuteczność algorytmów.
+
+```{r wariancje_Vehicle}
+num_vars <- Vehicle_dane[sapply(Vehicle, is.numeric)]
+
+Vehicle_sd <- sapply(num_vars, sd)
+round(Vehicle_sd,3)
+```
+
+Najmniejsza wariancja to **`r round(min(Vehicle_sd))`**, a największa to **`r round(max(Vehicle_sd))`**. Występują zatem dość duże różnice w wariancjach, przez co niektóre zmienne mogą mieć znacznie większy wpływ na klasteryzację, niż pozostałe. Stosujemy zatem standaryzację (w przeciwnym wypadku wpływ cech będzie niezrównoważony).
+
+```{r standaryzacja_Vehicle, echo = TRUE}
+Vehicle_scaled <- scale(Vehicle_dane) 
+```
+
+## Wizualizacja wyników grupowania
+
+W tej części wykorzystamy różne techniki wizualizacji. Dla metod grupujących zastosujemy wykresy rozrzutu z zaznaczonymi skupieniami, podczas gdy dla metod hierarchicznych przeanalizujemy dendrogramy pokazujące kolejność łączenia obserwacji. Dodatkowo, nałożymy prawdziwe etykiety klas, aby zobaczyć, na ile wyniki grupowania pokrywają się z rzeczywistą strukturą danych. Jako docelową liczbę klastrów przyjmujemy liczbę równą rzeczywistej liczbie typów samochodów w zbiorze `Vehicle` (w tym przypadku dokonujemy podziału na 4 klastry).
+
+### Metody grupujące
+
+Korzystamy z metod takich jak `k-means` oraz `PAM` (Partitioning Around Medoids), które są przykładami metod grupujących, aby wyznaczyć podział danych na 4 klastry.
+
+#### Algorytm k-means
+
+
+```{r kmeans_4_klastry}
+set.seed(1025)
+kmeans_k4 <- kmeans(Vehicle_scaled, centers = 4, iter.max = 10, nstart = 10)
+
+# Dodajemy etykietki k-means
+Vehicle_scaled_etykietki_kmeans <- kmeans_k4$cluster
+```
+
+```{r wykres_rozrzutu_kmeans_4, fig.height=5, fig.width=7, fig.cap="\\label{fig:wyk_rozrzut_kmeans_4} Wykres rozrzutu zmiennej Holl.Ra od zmiennej Sc.Var.maxis z zaznaczonymi klastrami i centrami klastrów"}
+dane_rozrzut_kmeans_4 <- data.frame(
+  Sc.Var.maxis = Vehicle_scaled[, "Sc.Var.maxis"],
+  Holl.Ra = Vehicle_scaled[, "Holl.Ra"],
+  Cluster = as.factor(Vehicle_scaled_etykietki_kmeans),
+  Class = Vehicle_etykiety )
+
+# centra klastrów
+centra_kmeans_4 <- data.frame(
+  Sc.Var.maxis = kmeans_k4$centers[, "Sc.Var.maxis"],
+  Holl.Ra = kmeans_k4$centers[, "Holl.Ra"],
+  Cluster = as.factor(1:nrow(kmeans_k4$centers)) )
+
+ggplot(dane_rozrzut_kmeans_4, aes(x = Sc.Var.maxis, y = Holl.Ra)) +
+    geom_point(aes(color = Cluster, shape = Class), size = 3) +
+  
+    geom_point(data = centra_kmeans_4, 
+             aes(fill = Cluster), 
+             shape = 18, size = 3, show.legend = FALSE) +
+
+  scale_shape_manual(values = 1:nlevels(dane_rozrzut_kmeans_4$Class)) +
+  labs(title = "Klastrowanie z wykorzystaniem k-means",
+       x = "Sc.Var.maxis", 
+       y = "Holl.Ra") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Klaster"),
+         shape = guide_legend(title = "Rzeczywista klasa"))
+
+```
+
+Wykres \ref{fig:wyk_rozrzut_kmeans_4} przedstawia zależność między zmiennymi `Holl.Ra` a `Sc.Var.maxis`. Kolorami oznaczone są klastry, wyznaczone za pomocą metody *k-means*, kształtami - rzeczywiste etykiety klas. Centra klastrów oznaczone są za pomocą czarnych rombów. Stworzone klastry są wypukłe (*k-means* z założenia tworzy klastry wypukłe). Możemy zauważyć bardzo dobrą separację klastra **2** (zawiera również jedynie obserwacje o etykiecie **"bus"**), Pozostałe klastry zawierają obserwacje ze wszystkich czterech typów samochodów. Obserwacje klastra **3** tworzą najbardziej zwartą grupę (dodatkowo przeważają w niej obserwacje z klasy **"bus"** i **"van"**). Klasy **"opel"** i **"saab"** silnie się mieszają.
+
+```{r wykres_skumulowana_wariancja, fig.height=4, fig.cap="\\label{fig:skum_war} Skumulowana wariancja PCA"}
+pca_wyniki <- prcomp(Vehicle_scaled)
+
+variance <- 100 * (pca_wyniki$sdev^2) / sum(pca_wyniki$sdev^2)
+cumulative.variance <- cumsum(variance)
+
+barplot(cumulative.variance, main = "Skumulowana wariancja (w %)",
+        names.arg = paste0("PC", 1:length(variance)))
+abline(h = 80, col = "green", lty = 2, lwd = 2)
+abline(h = 90, col = "red", lty = 2, lwd = 2)
+legend("right", legend = c("90%", "80%"), lwd = 2, lty = 2, bg="white", col = c("red", "green"))
+
+```
+
+Wykres \ref{fig:skum_war} prezentuje skumulowany procent wariancji wyjaśnionej przez kolejne składowe główne. Pierwsze dwie składowe wyjaśniają około **`r round(variance[1]+ variance[2],2)`**%, co może skutkować maskowaniem subtelnych różnic pomiędzy klasami.
+
+```{r wykres_otoczki_klastry, fig.height=5, fig.cap="\\label{fig:wyk_klastry} Klastry uzyskane metodą k-means w PCA"}
+fviz_cluster(kmeans_k4, Vehicle_scaled, repel = FALSE,
+             geom = "point" , main = "Klastrowanie z wykorzystaniem k-means")
+```
+
+Na wykresie \ref{fig:wyk_klastry} można zauważyć wyniki grupowania k-means w przestrzeni dwóch pierwszych składowych głównych. Możemy zauważyć dobrą separację klastra **2** od pozostałych, jednak jego zwartość jest najgorsza spośród wszystkich klastrów. Dodatkowo, klaster ten zawiera zdecydowanie mniej obserwacji niż pozostałe, co świadczy o wrażliwości metody *k-means* na obserwacje odstające. Również separacja przestrzenna pozostałych klastrów jest bardzo niska. 
+
+```{r wykres_silhouette_kmeans, fig.height=4, fig.cap="\\label{fig:wyk_sil_kmeans} Silhouette dla k-means"}
+sil_kmeans_k4 <- silhouette(kmeans_k4$cluster, dist = dist(Vehicle_scaled))
+
+fviz_silhouette(sil_kmeans_k4, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla k-means (K=4)", subtitle = paste0("Średnia wartość silhouette: ", round(mean(sil_kmeans_k4[,3]),2))) +
+  theme_minimal()+
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+Wykres `silhouette` dla algorytmu *k-means* (\ref{fig:wyk_sil_kmeans}) pokazuje niską średnią wartość wskaźnika (**0.27**). Liczne obserwacje mają niskie lub ujemne wartości `silhouette`, co oznacza, że zostały przypisane do niewłaściwego klastra lub znajdują się blisko granic między klastrami. To sugeruje, że *k-means* może być mniej skuteczny w przypadku danych o nieregularnych strukturach.
+
+```{r sil_dla_kmeans, results='asis'}
+
+sil_data <- summary(sil_kmeans_k4)
+
+cluster_rozmiar <- c(sil_data$clus.sizes[[1]],sil_data$clus.sizes[[2]],sil_data$clus.sizes[[3]],sil_data$clus.sizes[[4]])
+
+# Statystyki dla każdego klastra
+cluster_stat <- data.frame(
+  Klaster = 1:4,
+  "Średnia wartość silhouette" = sil_data$clus.avg.widths,
+  "Liczba obiektów" = cluster_rozmiar,
+  "Liczba ujemnych" = sapply(1:4, 
+                              function(i) {
+                                sum(sil_kmeans_k4[sil_kmeans_k4[, "cluster"] == i, "sil_width"] < 0)
+                              })
+)
+
+xtable_sil <- xtable(cluster_stat, 
+                     caption = "Statystyki silhouette dla każdego klastra (K-means)",
+                     label = "tab:silhouette_tab_kmeans")
+
+names(xtable_sil) <- c("Klaster", "Średnia wartość silhouette", "Liczba obiektów", "Liczba ujemnych")
+
+print(xtable_sil, 
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      comment = FALSE)
+```
+
+Tabela \ref{tab:silhouette_tab_kmeans} przedstawia wyniki z wykresu \ref{fig:wyk_sil_kmeans}. Możemy zauważyć, że największa średnia wartość silhouette została uzyskana dla klastra **2**, jednak zawiera on jedynie 9 obserwacji. Klaster **4** ma natomiast 6 obserwacji z ujemną wartością silhouette – błędnie przypisanych.
+
+
+```{r k-means ocena compare,}
+# Dla k means
+
+tab_vehicle_kmeans <- table(Vehicle_scaled_etykietki_kmeans, Vehicle_etykiety)
+
+# Wymuszamy, aby każde skupienie było przypisane do innej klasy
+
+# compareMatchedClasses accuracy
+accuracy_kmeans_compare <- compareMatchedClasses(Vehicle_scaled_etykietki_kmeans, Vehicle_etykiety, method = "exact")$diag
+
+```
+
+Trafność klasyfikacji dla metody k-means po dopasowaniu etykiet wyniosła `r round(accuracy_kmeans_compare * 100, 2)`%.
+
+
+
+#### Algorytm PAM
+
+
+```{r zastosowanie_PAM}
+# Grupowanie PAM dla K=4
+set.seed(1025)
+Vehicle_pam_4 <- pam(Vehicle_scaled, k = 4)
+
+etykietki_pam4 <- Vehicle_pam_4$clustering
+
+```
+
+
+
+```{r wykres_rozrzutu_PAM_4, fig.height=5, fig.width=7, fig.cap="\\label{fig:wyk_rozrzut_PAM} Wykres rozrzutu zmiennej Holl.Ra od zmiennej Sc.Var.maxis z zaznaczonymi klastrami i medoidami klastrów"}
+
+dane_rozrzut_PAM_4 <- data.frame(
+  Sc.Var.maxis = Vehicle_scaled[, "Sc.Var.maxis"],
+  Holl.Ra = Vehicle_scaled[, "Holl.Ra"],
+  Cluster = as.factor(etykietki_pam4),
+  Class = Vehicle_etykiety )
+
+
+medoidy_PAM_4 <- data.frame(
+  Sc.Var.maxis = Vehicle_pam_4$medoids[, "Sc.Var.maxis"],
+  Holl.Ra = Vehicle_pam_4$medoids[, "Holl.Ra"],
+  Cluster = as.factor(1:4) )
+
+
+ggplot(dane_rozrzut_PAM_4, aes(x = Sc.Var.maxis, y = Holl.Ra)) +
+  geom_point(aes(color = Cluster, shape = Class), size = 3) +
+  
+  geom_point(data = medoidy_PAM_4, 
+             aes(fill = Cluster), 
+             shape = 18, size = 3, show.legend = FALSE) +
+  
+  scale_shape_manual(values = 1:nlevels(dane_rozrzut_PAM_4$Class)) +
+  labs(title = "Klastrowanie z wykorzystaniem PAM",
+       x = "Sc.Var.maxis", 
+       y = "Holl.Ra") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Klaster"),
+         shape = guide_legend(title = "Rzeczywista klasa"))
+```
+
+Wykres \ref{fig:wyk_rozrzut_PAM} przedstawia rozrzut obserwacji względem zmiennych `Sc.Var.maxis` i `Holl.Ra`. Medoidy zostały oznaczone poprzez czarne romby. Analizując metodę *PAM* względem metody *k-means*, możemy zauważyć, że klaster **2** z wykresu \ref{fig:wyk_rozrzut_kmeans_4} został przypisany do klastra **1** (wykres `PAM`). Oznacza to że algorytm `PAM` jest bardziej odporny na obserwacje odstające. Dodatkowo, medoidy dla klastrów **1** i **3** znajdują się w obszarach o "gęstej" liczbie obserwacji o etykiecie **"saab"** i **"bus"** odpowiednio. Widoczne jest też znaczne nakładanie się klastrów **2** i **3**.
+
+```{r wyk_cluster_pam_4, fig.height=4, fig.cap="\\label{fig:wyk_clus_PAM} Wizualizacja wyników PAM w przestrzeni PCA"}
+
+fviz_cluster(Vehicle_pam_4, repel = FALSE,
+             geom = "point" , main = "Klastrowanie z wykorzystaniem PAM")
+```
+
+Zrzutowanie wyników klasteryzacji metodą PAM (wykres \ref{fig:wyk_clus_PAM}) pokazuje dość silne nakładanie się rzutów klastra **2** i **3**. Widoczna jest również o wiele gorsza separacja przestrzenna w porównaniu do metody *k-means* (praktycznie wszystkie rzuty graniczą bezpośrednio z jakimś innym klastrem).
+
+```{r wyk_silhouette_pam_4, fig.height=4,fig.cap="\\label{fig:wyk_sil_PAM} Wykres wskaźnika silhouette dla metody PAM"}
+sil_pam_k4 <- silhouette(Vehicle_pam_4$clustering, dist = dist(Vehicle_scaled))
+
+
+fviz_silhouette(sil_pam_k4, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla PAM (K=4)", subtitle = paste0("Średnia szerokość silhouette: ", round(mean(sil_pam_k4[,3]),2))) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+Wykres `silhouette` dla algorytmu *PAM* \ref{fig:wyk_sil_PAM} przedstawia niższą średnią wartość tego wskaźnika (**0.22**) niż dla *k-means*. Znaczna większość obserwacji klastrów **1** i **4** ma wartość wskaźnika `silhouette` powyżej średniej wartości. O wiele gorsze wyniki osiągane są dla klastrów **2** i **3**, gdzie jedynie niewielka część obserwacji osiąga dobrą wartość wskaźnika. Dodatkowo, niektóre obserwacje z klastrów **2** i **3** przyjmują ujemną wartość tego wskaźnika, co oznacza, że najprawdopodobniej zostały one przypisane do nieprawidłowego klastra.
+
+
+```{r sil_dla_pam, results='asis'}
+
+sil_data <- summary(sil_pam_k4)
+
+cluster_rozmiar <- c(sil_data$clus.sizes[[1]],sil_data$clus.sizes[[2]],sil_data$clus.sizes[[3]],sil_data$clus.sizes[[4]])
+
+# Statystyki dla każdego klastra
+cluster_stat <- data.frame(
+  Klaster = 1:4,
+  "Średnia wartość silhouette" = sil_data$clus.avg.widths,
+  "Liczba obiektów" = cluster_rozmiar,
+  "Liczba ujemnych" = sapply(1:4, 
+                              function(i) {
+                                sum(sil_pam_k4[sil_pam_k4[, "cluster"] == i, "sil_width"] < 0)
+                              })
+)
+
+xtable_sil <- xtable(cluster_stat, 
+                     caption = "Statystyki silhouette dla każdego klastra (PAM)",
+                     label = "tab:silhouette_tab_pam")
+
+names(xtable_sil) <- c("Klaster", "Średnia wartość silhouette", "Liczba obiektów", "Liczba ujemnych")
+
+print(xtable_sil, 
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      comment = FALSE)
+```
+
+Tabela \ref{tab:silhouette_tab_pam} zawiera podsumowanie wyników wykresu  \ref{fig:wyk_sil_PAM}. Porównując średnie wartości `silhouette` względem tych, uzsykanych metodą *k-means*, możemy zauważyć pogorszenie wyników dla klastrów **2** i **3** (również zauważalna jest większa liczba nieprawidłowo przypisanych obserwacji). Jedyna poprawa jest widoczna dla klastra **4**.
+
+
+```{r pam ocena comapare}
+# Dla PAM
+
+
+
+tab_vehicle_PAM <- table(etykietki_pam4, Vehicle_etykiety)
+
+
+# Wymuszamy, aby każde skupienie było przypisane do innej klasy
+accuracy_pam_compare<-compareMatchedClasses(etykietki_pam4, Vehicle_etykiety, method = "exact")$diag
+
+```
+
+Trafność klasyfikacji dla metody k-means po dopasowaniu etykiet wyniosła `r round(accuracy_pam_compare * 100, 2)`%.
+
+
+
+
+### Algorytmy hierarchiczne
+
+#### AGNES
+
+Korzystamy z metody hierarchicznej `AGNES`, która jest przykładem metody aglomeracyjnej, w celu wyznaczenia podziału danych na 4 klastry. Będziemy również porównywać różne metody łączenia klastrów (*najbliższego sąsiada*, *najdalszego sąsiada* oraz *średniej odległości*).
+
+W celu zastosowania metody `AGNES`, musimy wyznaczyć macierz niepodobieństw zbioru `Vehicle_scaled`.
+
+```{r agnes_metody_laczenia, echo = TRUE}
+niepodob_Vehicle <- daisy(Vehicle_scaled)
+mac_niepodob_Veh <- as.matrix(niepodob_Vehicle)
+
+# Metody łączenia klastrów
+Agnes_avg_Veh <- agnes(x=mac_niepodob_Veh,diss=TRUE, method="average")
+Agnes_single_Veh <- agnes(x=mac_niepodob_Veh,diss=TRUE, method="single")
+Agnes_complete_Veh <- agnes(x=mac_niepodob_Veh,diss=TRUE, method="complete")
+```
+
+
+
+```{r agnes_macierze,echo=FALSE,results='hide'}
+#przypisanie etykiet
+
+etykiety_agnes_avg <- cutree(Agnes_avg_Veh, k=4)
+#table(etykiety_agnes_avg)
+
+etykiety_agnes_single <- cutree(Agnes_single_Veh, k=4)
+#table(etykiety_agnes_single)
+
+etykiety_agnes_comp <- cutree(Agnes_complete_Veh, k=4)
+#table(etykiety_agnes_comp)
+
+
+#Sprawdzenie z rzeczywistymi klasami
+
+tab_agnes_avg <- table(etykiety_agnes_avg, Vehicle_etykiety)
+match.avg<-matchClasses(tab_agnes_avg)
+accuracy_avg <- mean(match.avg[etykiety_agnes_avg] == Vehicle_etykiety)
+
+compare_avg <- compareMatchedClasses(etykiety_agnes_avg, Vehicle_etykiety, method = "exact")$diag
+
+
+tab_agnes_single <- table(etykiety_agnes_single, Vehicle_etykiety)
+match.sin<-matchClasses(tab_agnes_single)
+accuracy_sin <- mean(match.sin[etykiety_agnes_single] == Vehicle_etykiety)
+
+compare_sin <- compareMatchedClasses(etykiety_agnes_single, Vehicle_etykiety, method = "exact")$diag
+
+
+tab_agnes_complete <- table(etykiety_agnes_comp, Vehicle_etykiety)
+match.com<-matchClasses(tab_agnes_complete)
+accuracy_com<-mean(match.com[etykiety_agnes_comp] == Vehicle_etykiety)
+
+compare_com <- compareMatchedClasses(etykiety_agnes_comp, Vehicle_etykiety, method = "exact")$diag
+
+```
+
+Skuteczności w poniższej tabeli obliczono metodami `matchClasses` i `compareMatchedClasses` - metoda `exact`.
+
+```{r tabela accuracy i pairs}
+# Zaokrąglone wartości trafności i matched pairs
+accuracy_avg_rounded <- round(accuracy_avg * 100, 2)
+accuracy_sin_rounded <- round(accuracy_sin * 100, 2)
+accuracy_com_rounded <- round(accuracy_com * 100, 2)
+
+compare_avg_rounded <- round(compare_avg * 100, 2)
+compare_sin_rounded <- round(compare_sin * 100, 2)
+compare_com_rounded <- round(compare_com * 100, 2)
+
+# Tabela
+wyniki <- data.frame(
+  Metryka = c("matchClasses (%)", "compareMatchedClasses (%)"),
+  `AGNES average` = c(accuracy_avg_rounded, compare_avg_rounded),
+  `AGNES single` = c(accuracy_sin_rounded, compare_sin_rounded),
+  `AGNES complete` = c(accuracy_com_rounded, compare_com_rounded)
+)
+
+kable(wyniki, caption = "Porównanie jakości klasteryzacji metodą AGNES (różne metody łączenia)")
+```
+
+Najlepsze wyniki osiąga metoda AGNES complete - najlepiej odwzorowuje rzeczywiste etykiety klas, zarówno pod względem poprawnych przypisań, jak i zgodności par obiektów.
+
+Najsłabiej wypada metoda AGNES single (łączenie najbliższych sąsiadów) słabo radzi sobie z odwzorowaniem struktury klas.
+
+
+```{r funkcja_agnes_rzeczywiste_etykiety, fig.height=4, fig.width=7, fig.cap="\\label{fig:agnes_avg_rzecz_etyk}Dendrogram z użyciem average linkage"}
+# Drzewa: etykiety z nieprawidłowymi przypisaniami
+dendrogram_prawdziwe_etykiety <- function(agnes_dane, metoda){
+
+dendrogram_dane <- as.dendrogram(agnes_dane)
+
+# kolory: rzeczywiste klasy
+etykietki_kolory <- as.numeric(Vehicle_etykiety)
+
+# kolory zgodnie z kolejnością obiektów  w dendrogramie
+kolory_obiektow <- etykietki_kolory[agnes_dane$order]
+
+# Porównanie: partycja na 4 skupienia vs. rzeczywiste klasy
+fviz_dend(dendrogram_dane, cex=0.15, k=4,  label_cols=kolory_obiektow, k_colors=c(1,2,3,4),
+          main=paste0("Partycja na 4 skupienia vs. rzeczywiste klasy ", metoda), lwd = 0.5)
+}
+
+dendrogram_prawdziwe_etykiety(Agnes_avg_Veh, " (average linkage)")
+```
+
+Wykres \ref{fig:agnes_avg_rzecz_etyk} przedstawia dendrogram uzyskany metodą łączenia `average linkage` z podziałem na 4 klastry. Widoczna jest dominacja klastra oznaczonego *zielonym* kolorem (zawiera on najwięcej obserwacji) i bardzo mały wkład klastra *niebieskiego* (zawiera jedynie 2 obserwacje). Odcinając drzewo na poziomie czterech klastrów (zgodnie z liczbą klas), widzimy częściowe pokrycie z rzeczywistą strukturą danych. Nie jest ono jednak na wysokim poziomie. Przykładowo, dla klasy oznaczonej kolorem *czerwonym* żadna z obserwacji należących do tego klastra nie jest prawidłowo przypisana (obserwacje te powinny znajdować się w *czarnym* klastrze). Ta metoda dobrze radzi sobie z równomiernie rozproszonymi danymi i może wykrywać niekuliste skupienia. Jednakże dla danych Vehicle, które mają pewne klasy trudne do separacji (np. **"saab"** i **"opel"**), podział nie jest najlepszy.
+
+```{r dendrogram_prawdziwe_etykiety_complete, fig.height=4, fig.width=7, fig.cap="\\label{fig:agnes_complete_rzecz_etyk} Dendrogram z użyciem complete linkage"}
+dendrogram_prawdziwe_etykiety(Agnes_complete_Veh, " (complete linkage)")
+
+```
+
+Dendrogram (wykres \ref{fig:agnes_complete_rzecz_etyk}) uzyskany metodą `complete linkage` ma zdecydowanie bardziej równoliczne klastry. Można zauważyć, że metoda ta stworzyła dokładnie taki sam klaster (*czerwony*) jak w przypadku metody `average linkage` (zawiera te same obserwacje). Ponownie widoczna jest mała zgodność podziałów z rzeczywistymi etykietkami klas.
+
+```{r dendrogram_prawdziwe_etykiety_single, fig.height=4, fig.width=7, fig.cap="\\label{fig:agnes_single_rzecz_etyk} Dendrogram z użyciem single linkage"}
+dendrogram_prawdziwe_etykiety(Agnes_single_Veh, " (single linkage)")
+
+```
+
+Stosując metodę `single linkage` (wykres \ref{fig:agnes_single_rzecz_etyk}) otrzymujemy podziały tworzące efekt "łańcucha". Widzimy, że dane są łączone w sposób ciągły, często poprzez pojedyncze punkty, co prowadzi do bardzo wydłużonych i nierównych gałęzi. Taki układ nie sprzyja tworzeniu sensownych, zwartych skupień (wiele klas jest "zlepionych" w jeden duży klaster). 
+
+```{r klastry_agnes_PCA_avg, fig.height=4, fig.cap="\\label{fig:agnes_PCA_avg} Rzutowanie klastrów uzyskanych metodą AGNES (average linkage) na wykres PCA"}
+# Wizualizacja klastrów
+# wykres rozrzutu 2D (PCA)
+fviz_cluster(list(data=Vehicle_scaled, cluster=etykiety_agnes_avg), repel = FALSE,
+             geom = "point" , main = "Klastrowanie z wykorzystaniem AGNES (average linkage)")
+```
+
+Po odwzorowaniu wyników grupowania `AGNES` metodą `average linkage` na przestrzeń dwóch głównych składowych PCA widzimy, że niektóre klastry są wyraźnie wyodrębnione i tworzą zwarte grupy (np. klaster **3**). Inne skupiska są mniej jednoznaczne – punkty przypisane do różnych klastrów częściowo się przenikają (rzut klastra **4** znajduje się w całości wewnątrz rzutu klastra **2**), szczególnie w środkowej części wykresu. Wskazuje to, że nie wszystkie rzeczywiste klasy zostały odtworzone w sposób poprawny przez `AGNES`. 
+
+```{r klastry_agnes_PCA_comp, fig.height=4, fig.cap="\\label{fig:agnes_PCA_comp} Rzutowanie klastrów uzyskanych metodą AGNES (complete linkage) na wykres PCA"}
+fviz_cluster(list(data=Vehicle_scaled, cluster=etykiety_agnes_comp), repel = FALSE,
+             geom = "point" , main = "Klastrowanie z wykorzystaniem AGNES (complete linkage)")
+
+```
+
+Wyniki dla `complete linkage` (wykres \ref{fig:agnes_PCA_comp}) są podobne do `average linkage`, ale klastry wydają się nieco bardziej zwarte. Mimo to nadal występuje silne nakładanie się rzutów klastrów (ponownie, jak przy `average linkage` klastra **1** i **2**). Wykres pokazuje, że nawet `complete linkage` nie rozwiązuje problemu słabej separacji klas w tym zbiorze danych. 
+
+
+```{r klastry_agnes_PCA_sing, fig.height=4, fig.cap="\\label{fig:agnes_PCA_sing}Rzutowanie klastrów uzyskanych metodą AGNES (single linkage) na wykres PCA"}
+fviz_cluster(list(data=Vehicle_scaled, cluster=etykiety_agnes_single), repel = FALSE,
+             geom = "point" , main = "Klastrowanie z wykorzystaniem AGNES (single linkage)")
+```
+
+Wykres dla `single linkage` (\ref{fig:agnes_PCA_sing}) pokazuje jeszcze gorszą separację klastrów niż w poprzednich metodach. Niemal wszystkie obserwację są zgrupowane w jednym dużym klastrze, co potwierdza, że `single linkage` nie jest odpowiednią metodą dla tego typu danych. Wykres ilustruje, że metoda ta nie jest w stanie wykryć subtelnych różnic między klasami.
+
+
+```{r silhouette_agnes_avg, fig.height=4, fig.cap="\\label{fig:agnes_sil_avg}Silhouette AGNES (average linkage), K=4, avg.width = 0.33" }
+#Wykresy silhouette
+
+sil_agnes_k4_avg <- silhouette(etykiety_agnes_avg, dist = dist(Vehicle_scaled))
+
+
+fviz_silhouette(sil_agnes_k4_avg, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla AGNES: average linkage (K=4)", subtitle = paste0("Średnia szerokość silhouette: ", round(mean(sil_agnes_k4_avg[,3]),2))) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+Średnia wartość silhouette dla metody `average linkage` (wykres \ref{fig:agnes_sil_avg}) wynosi **0.33**, co jest wynikiem wyższym niż dla *k-means* i *PAM*. Wszystkie obserwajce z klastra **3** mają wartości powyżej średniej, co wskazuje na dobrą spójność, podczas gdy dla innych klastrów ledwie połowa obserwacji ma wartości powyżej średniej. Pozostałe mają niższe wartości (a nawet ujemne). Wykres sugeruje, że `average linkage` może być lepszy od metod grupujących, ale nadal nie jest idealny.
+
+```{r silhouette_agnes_comp, fig.height=4, fig.cap="\\label{fig:agnes_sil_comp} Silhouette AGNES (complete linkage), K=4, avg.width = 0.26"}
+sil_agnes_k4_comp <- silhouette(etykiety_agnes_comp, dist = dist(Vehicle_scaled))
+
+fviz_silhouette(sil_agnes_k4_comp, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla AGNES: complete linkage (K=4)",
+          subtitle = paste0("Średnia szerokość silhouette: ", round(mean(sil_agnes_k4_comp[,3]),2))) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+Dla metody `complete linkage` średnia wartość silhouette wynosi **0.26** (wykres \ref{fig:agnes_sil_comp}), co jest wartością niższą niż dla `average linkage`. Klastry **3** i **4** nadal mają wysoką wartość, ale pozostałe klastry są słabo zdefiniowane. Najgorsze wyniki otrzymujemy dla klastra **2**, gdzie znacząca część obserwacji została źle podporządkowana (ujemna wartość silhouette).
+
+```{r silhouette_agnes_sing, fig.height=4, fig.cap="\\label{fig:agnes_sil_sing}Silhouette AGNES (single linkage), K=4, avg. width = 0.08"}
+sil_agnes_k4_sing <- silhouette(etykiety_agnes_single, dist = dist(Vehicle_scaled))
+
+fviz_silhouette(sil_agnes_k4_sing, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla AGNES: single linkage (K=4)",
+          subtitle = paste0("Średnia szerokość silhouette: ", round(mean(sil_agnes_k4_sing[,3]),2))) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+Dla metody łączenia `single linkage` średnia wartość silhouette wynosi zaledwie **0.08**, co jest najgorszym spośród wszystkich wyników. Większość obserwacji ma wartości bliskie zeru lub ujemne, co wskazuje na bardzo słabe grupowanie. Wykres \ref{fig:agnes_sil_sing} potwierdza, że single linkage jest najmniej skuteczną metodą dla tych danych.
+
+
+## Ocena jakości grupowania. Wybór optymalnej liczby skupień i porównanie metod
+
+W celu oceny jakości uzyskanych grupowań porównamy przypisania obserwacji do klastrów z rzeczywistymi etykietkami klas w zbiorze `Vehicle_scaled`. Dodatkowo wykorzystamy różne wskaźniki zewnętrzne oraz wewnętrzne w celu wyboru optymalnej liczby skupień.  
+
+
+```{r macierz_niepodobienstwa_wykres, fig.height=4,fig.cap="\\label{fig:macierz_niepodobienstwa} Macierz niepodobieństwa danych Vehicle (uporządkowana)"}
+# macierz niepodobieństwa
+mac_niepodob_Vehicle <- daisy(Vehicle_scaled)
+macierz_niepodob_Vehicle <- as.matrix(mac_niepodob_Vehicle)
+# po uporządkowaniu
+fviz_dist(mac_niepodob_Vehicle, order = TRUE, show_labels = FALSE) +
+  ggtitle("Macierz niepodobieństwa danych Vehicle")
+```
+
+Macierz niepodobieństwa (wykres \ref{fig:macierz_niepodobienstwa}) pokazuje odległości między obserwacjami. Czerwone obszary oznaczają małe odległości, a niebieskie – duże. Widoczne są pewne grupy o podobieństwach. Możemy subiektywnie wyznaczyć cztery główne podziały (czerwone kwadraty), które można zauważyć wzdłuż głównej przekątnej. Brakuje jednak wyraźnych granic między klastrami. Wykres potwierdza, że dane są trudne do separacji, co tłumaczy niską skuteczność metod grupowania.
+
+
+```{r rozne_k_silhouette_i_gap_kmeans, fig.height=5, fig.cap="\\label{fig:silhouette_gap} Wybór optymalnej liczby klastrów: wss, silhouette i gap statistic (k-means)"}
+# Inne zaawansowane  metody do wyboru optymalnego K
+wss_means <- fviz_nbclust(Vehicle_scaled, FUNcluster = kmeans, method = "wss") + geom_vline(xintercept = 2, linetype = 2) +
+  ggtitle("WSS dla K-means")
+
+sil_means <- fviz_nbclust(Vehicle_scaled, FUNcluster = kmeans, method = "silhouette")+
+ggtitle("Silhouette statistic dla K-means")
+
+gap_means <- fviz_nbclust(Vehicle_scaled, FUNcluster = kmeans, method = "gap") +
+  ggtitle("Gap statistic dla K-means")
+
+wss_means / (sil_means|gap_means)
+```
+
+Wykres (\ref{fig:silhouette_gap}) `WSS` (Within Sum of Squares) pokazuje, że wartość błędu maleje wraz ze wzrostem liczby klastrów, ale spadek jest znacznie wolniejszy po **K=2**, co sugeruje, że **2** klastry mogą być rozsądnym wyborem. Wykres `Silhouette` wskazuje na optymalną liczbę **K=2** (najwyższa średnia wartość). `Gap Statistic` potwierdza **K=3** jako najbardziej optymalny podział. Wyniki te sugerują, że wybór **K=2** jest kompromisem między redukcją WSS a zachowaniem spójności klastrów.
+
+
+```{r rozne_k_silhouette_i_gap_pam, fig.height=5, fig.cap="\\label{fig:silhouette_gap_pam} Wybór optymalnej liczby klastrów: wss, silhouette i gap statistic (PAM)"}
+# Inne zaawansowane  metody do wyboru optymalnego K
+wss_pam <- fviz_nbclust(Vehicle_scaled, FUNcluster = pam, method = "wss") + geom_vline(xintercept = 2, linetype = 2) +
+  ggtitle("WSS dla PAM")
+
+sil_pam <- fviz_nbclust(Vehicle_scaled, FUNcluster = pam, method = "silhouette")+
+ggtitle("Silhouette statistic dla PAM")
+
+gap_pam <- fviz_nbclust(Vehicle_scaled, FUNcluster = pam, method = "gap") +
+  ggtitle("Gap statistic dla PAM")
+
+wss_pam / (sil_pam|gap_pam)
+```
+
+Wykres \ref{fig:silhouette_gap_pam} dla `PAM` prezentują niemal identyczne wyniki co te dla `K-means`. Ponownie **K=2** wydaje się być najlepszym wyborem.
+
+```{r rozne_k_silhouette_i_gap_agnes, fig.height=5, fig.cap="\\label{fig:silhouette_gap_agnes} Wybór optymalnej liczby klastrów: wss, silhouette i gap statistic (AGNES)"}
+
+# Funkcja do obliczania WSS dla różnych K
+wss <- sapply(2:8, function(k) {
+  clusters <- cutree(Agnes_avg_Veh, k)
+  sum(sapply(1:k, function(cl) {
+    sum(mac_niepodob_Vehicle[clusters == cl]^2) / (2 * sum(clusters == cl))
+  }))
+})
+
+ag_wss <- fviz_nbclust(Vehicle_scaled, FUNcluster = function(x, k) list(cluster = cutree(Agnes_avg_Veh, k)), 
+             method = "wss") +
+  geom_vline(xintercept = 2, linetype = 2) +
+  ggtitle("WSS dla AGNES (average linkage)")
+
+ag_sil <- fviz_nbclust(Vehicle_scaled, FUNcluster = function(x, k) list(cluster = cutree(Agnes_avg_Veh, k)), 
+             method = "silhouette") +
+  ggtitle("Silhouette dla AGNES \n (average linkage)")
+
+ag_gap <- fviz_nbclust(Vehicle_scaled, FUNcluster = function(x, k) list(cluster = cutree(Agnes_avg_Veh, k)), 
+             method = "gap_stat") +
+  ggtitle("Gap statistic dla AGNES \n (average linkage)")
+
+
+ag_wss / (ag_sil|ag_gap)
+
+```
+
+Dla algorytmu `AGNES` z metodą łączenia `average linkage` dla WSS punkt łokciowy występuje w **K=2**, podobnie jak wcześniejsze metody. `Silhouette` osiąga szczyt dla **K=2**. `Gap Statistic` wskazuje na **K=10**. Metoda `AGNES` wydaje się bardziej stabilna niż `PAM`, ale mniej precyzyjna niż `K-means` w identyfikacji naturalnych klastrów.
+
+\vspace{1cm}
+
+
+
+```{r zgodnosc_partycji_kmeans_pam, fig.height=4, fig.cap="\\label{fig:zgodnosc_kmeans_pam} Zgodność partycji uzyskanych metodami k-means i PAM w zależności od liczby klastrów K"}
+dane <- Vehicle_scaled
+K_max <- 8
+zgodnosc_partycji <- numeric(K_max)
+
+for (K in 2:K_max)
+{
+  set.seed(1025)
+  pam_k <- pam(dane, k=K)$clustering
+  
+  set.seed(1025)
+  kmeans_k <- kmeans(x=dane, centers=K, nstart = 10)$cluster
+  
+  part_zgod <- compareMatchedClasses(pam_k, kmeans_k, method="exact")$diag
+  zgodnosc_partycji[K] <- part_zgod
+}
+
+plot(2:K_max, zgodnosc_partycji[-1], pch="o", type="b", col="blue",xlab="K (liczba klastrów)", ylab="Zgodność partycji")
+title("Zgodność partycji dla metod K-means i PAM")
+grid()
+```
+
+### Wskaźniki wewnętrzne
+
+Skorzystamy z funkcji *clValid* w celu wyznaczenia wartości wskaźników wewnętrznych w zależności od liczby klastrów. Przeanalizujemy trzy indeksy:
+
+* **Silhouette** - bada zwartość klastrów i separację przestrzenną,
+* **Wskaźnik Dunn’a**,
+* **Connectivity** - bada spójność i zdolność przyłączeniową.
+
+```{r wskazniki_wewnetrzne, fig.height=6, fig.width=7,fig.cap="\\label{fig:wskazniki_wew} Porównanie metod klasteryzacji wg wewnętrznych indeksów jakości (2–6 klastrów)"}
+# wskazujemy algorytmy analizy skupień, które będą porównane
+metody <- c("agnes","kmeans", "pam")
+
+# zakres dla liczby skupień
+K.zakres <- 2:6
+
+internal.validation <- clValid(Vehicle_scaled, nClust=K.zakres, clMethods=metody, validation="internal")
+
+#summary(internal.validation)
+#optimalScores(internal.validation)
+
+par(mfrow = c(2, 2))
+plot(internal.validation, legend = FALSE, lwd=2)
+plot.new()
+legend("center", clusterMethods(internal.validation), col=1:9, lty=1:9, pch=paste(1:9))
+par(mfrow = c(1, 1))
+```
+
+
+
+
+### Ocena stabilności
+
+Ponownie wykorzystujemy funkcję *clValid* aby zbadać stabilność algorytmów w zależności od liczby podziałów. Przeanalizujemy trzy miary:
+
+* **APN** – Average Proportion of Non-overlap,
+* **AD** – Average Distance,
+* **ADM** – Average Distance between Means.
+
+```{r ocena_stabilnosci, fig.height=6, fig.width=7,fig.cap="\\label{fig:ocena_stabil} Ocena stabilności metod klasteryzacji na podstawie miar APN, AD i ADM"}
+stability.validation <- clValid(Vehicle_scaled, nClust=K.zakres, clMethods=metody, validation="stability")
+#summary(stability.validation)
+#optimalScores(stability.validation)
+
+par(mfrow = c(2,2))
+plot(stability.validation, measure=c("APN","AD","ADM"), legend=FALSE, lwd=2)
+plot.new()
+legend("center", clusterMethods(stability.validation), col=1:9, lty=1:9, pch=paste(1:9))
+par(mfrow = c(1,1))
+```
+
+Wskaźniki stabilności (APN, AD, ADM) pokazują, że `k-means` jest najbardziej stabilny dla **K=3** (zwłaszcza dla wskaźnika ADM i APN wartość ta jest najmniejsza spośród wszystkich). `PAM` ma niższą stabilność, szczególnie dla **K>2**, lecz skoki wartości są między kolejnymi podziałamu są zdecydowanie łagodniejsze. `AGNES` zachowuje stabilność podobną do `k-means`, ale dla **K>4** wyniki są gorsze. Podsumowując wykresy \ref{fig:ocena_stabil}, `k-means` wydaje się być najbardziej stabliną metodą spośród omawianych.
+
+
+### Wybór najlepszej liczby klastrów na podstawie wielu wskaźników
+
+Wykorzystujemy funkcję `NbClust` z pakietu *NbClust*, która zawiera wiele wskaźników
+
+```{r zbior_wskaznikow_nbclust,results='hide',fig.show='hide', echo=TRUE}
+set.seed(1025)
+res<-NbClust(Vehicle_scaled, diss = NULL, distance = "euclidean", min.nc=2, max.nc=6, 
+             method = "kmeans", index = "all")
+
+etykietki_NbClust<- res$Best.partition
+
+tab_nbclust <- table(etykietki_NbClust, Vehicle_etykiety)
+```
+
+Funkcję *NbClust* można wykorzystać również do wyznaczenia podziału zaproponowanego przez tę funkcję.
+
+```{r nb_clust_dokladnosc, echo=TRUE}
+
+etykietki_NbClust<- res$Best.partition
+tab_nbclust <- table(etykietki_NbClust, Vehicle_etykiety)
+
+matchClasses(tab_nbclust)
+(dokl_nbclust <- compareMatchedClasses(etykietki_NbClust, Vehicle_etykiety)$diag)
+
+```
+
+Używając funkcji *compareMatchedClasses* uzyskujemy zgodność na poziomie `r round( dokl_nbclust,3)*100`%.
+
+```{r rozne_wskazniki_wyk_slupkowy, fig.cap="\\label{fig:rekomendacje_indeksow} Rekomendowana liczba klastrów według różnych indeksów jakości"}
+index_val <- res$All.index
+nc_val <- 2:6
+
+index_zb <- data.frame(
+  nc = nc_val,
+  zlicz = as.numeric(table(factor(res$Best.nc[1,], levels = nc_val)))
+)
+
+
+ggplot(index_zb, aes(x = nc, y = zlicz)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Rekomendowana liczba klastrów",
+       x = "Liczba klastrów",
+       y = "Liczba wskazań przez różne indeksy") +
+  theme_minimal()
+```
+
+Większość indeksów (wykres \ref{fig:rekomendacje_indeksow}) rekomenduje **K=2** lub **K=3** (dla 3 klastrów aż 12 sposród 24 wskaźników wskazało taki podział). Brak zgodności między indeksami potwierdza, że zbiór danych jest trudny do jednoznacznego podziału.
+
+
+Podsumowując wszystkie wnioski, wybieramy **K=3** jako optymalny podział, gdyż został on wskazany przez największą liczbę wskaźników.
+
+
+
+
+
+## Interpretacja wyników grupowania
+
+Przeprowadzamy analogiczną analizę dla **K=3**, wykorzystując metody `k-means`, `PAM` oraz `AGNES`.
+
+### K-means dla K=3
+
+```{r kmeans_3_klastry}
+set.seed(1025)
+kmeans_k3 <- kmeans(Vehicle_scaled, centers = 3, iter.max = 10, nstart = 10)
+
+# Dodajemy etykietki k-means
+Vehicle_scaled_etykietki_kmeans_optymalne_klastry <- kmeans_k3$cluster
+```
+
+
+```{r wykres_otoczki_klastry_kmeans_3, fig.height=5, fig.cap="\\label{fig:wyk_klastry_3} Klastry uzyskane metodą k-means w PCA"}
+fviz_cluster(kmeans_k3, Vehicle_scaled, repel = FALSE,
+             geom = "point" , main = "Klastrowanie z wykorzystaniem k-means")
+```
+
+Na wykresie \ref{fig:wyk_klastry_3} można zauważyć wyniki grupowania `k-means` w przestrzeni dwóch pierwszych składowych głównych. Możemy zauważyć dobrą separację wszystkich rzutów klastrów. Dodatkowo, klastry te są dość zwarte i wypukłe.
+
+```{r wykres_silhouette_kmeans_3, fig.height=4, fig.cap="\\label{fig:wyk_sil_kmeans_3} Silhouette dla k-means"}
+sil_kmeans_k3 <- silhouette(kmeans_k3$cluster, dist = dist(Vehicle_scaled))
+
+fviz_silhouette(sil_kmeans_k3, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla k-means (K=3)", subtitle = paste0("Średnia wartość silhouette: ", round(mean(sil_kmeans_k3[,3]),2))) +
+  theme_minimal()+
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+Wykres `silhouette` dla algorytmu *k-means* (\ref{fig:wyk_sil_kmeans_3}) pokazuje wyższą średnią wartość wskaźnika (**0.29**) niż dla czterech klastrów. Nieiczne obserwacje w klastrze **3** mają ujemne wartości `silhouette`, co oznacza, że zostały przypisane do niewłaściwego klastra lub znajdują się blisko granic między klastrami.
+
+
+```{r dokladnosc_kmeans_3, echo=TRUE}
+
+tab_vehicle_kmeans_3 <- table(Vehicle_scaled_etykietki_kmeans_optymalne_klastry, Vehicle_etykiety)
+
+matchClasses(tab_vehicle_kmeans_3)
+(kmeans_dokl_3 <- compareMatchedClasses(Vehicle_scaled_etykietki_kmeans_optymalne_klastry, Vehicle_etykiety)$diag)
+
+```
+
+Korzystając z funkcji `compareMatchedClasses` uzyskujemy zgodność klasyfikacji na poziomie `r round(kmeans_dokl_3,3)*100`%.
+
+### PAM dla K=3
+
+
+```{r zastosowanie_PAM_K3}
+# Grupowanie PAM dla K=3
+set.seed(1025)
+Vehicle_pam_3 <- pam(Vehicle_scaled, k = 3)
+
+etykietki_pam3 <- Vehicle_pam_3$clustering
+
+```
+
+
+```{r wyk_cluster_pam_3, fig.height=4, fig.cap="\\label{fig:wyk_clus_PAM_3} Wizualizacja wyników PAM w przestrzeni PCA"}
+
+fviz_cluster(Vehicle_pam_3, repel = FALSE,
+             geom = "point" , main = "Klastrowanie z wykorzystaniem PAM")
+```
+
+Zrzutowanie wyników klasteryzacji metodą `PAM` (wykres \ref{fig:wyk_clus_PAM_3}) pokazuje dość gorszą separację rzutów klas niż w przypadku `k-means`. Klaster **1** pozostał bez zmian.
+
+```{r wyk_silhouette_pam_3, fig.height=4,fig.cap="\\label{fig:wyk_sil_PAM_3} Wykres wskaźnika silhouette dla metody PAM"}
+sil_pam_k3 <- silhouette(Vehicle_pam_3$clustering, dist = dist(Vehicle_scaled))
+
+
+fviz_silhouette(sil_pam_k3, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla PAM (K=3)", subtitle = paste0("Średnia szerokość silhouette: ", round(mean(sil_pam_k3[,3]),2))) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+Wykres `silhouette` dla algorytmu `PAM` \ref{fig:wyk_sil_PAM_3} przedstawia identyczną średnią wartość tego wskaźnika (**0.29**) co dla *k-means*. Spora część obserwacji klastra **2** ma ujemną wartość wskaźnika `silhouette`. Obserwujemy jednak wyższe wartości dla klastrów **1** i **3**.
+
+```{r dokladnosc_pam_3}
+tab_vehicle_PAM_3 <- table(etykietki_pam3, Vehicle_etykiety)
+
+matchClasses(tab_vehicle_PAM_3)
+
+(pam_dokl_3 <- compareMatchedClasses(etykietki_pam3, Vehicle_etykiety)$diag )
+```
+
+Korzystając z funkcji `compareMatchedClasses` uzyskujemy zgodność klasyfikacji na poziomie `r round(pam_dokl_3,3)*100`%. Jest to wynik lepszy o nieco ponad 1 punkt procentowy niż dla `k-means`. 
+
+
+### AGNES dla K=3
+
+Wykorzystamy tylko metodę łączenia `average linkage` i `complete linkage`, ponieważ dawały one najlepsze wyniki dla poprzedniej analizy.
+
+```{r agnes_metody_laczenia_3, echo = TRUE}
+Agnes_avg_Veh_3 <- agnes(x=mac_niepodob_Veh,diss=TRUE, method="average")
+Agnes_complete_Veh_3 <- agnes(x=mac_niepodob_Veh,diss=TRUE, method="complete")
+
+```
+
+
+```{r agnes_macierze_3, echo=TRUE}
+
+etykiety_agnes_avg_3 <- cutree(Agnes_avg_Veh, k=3)
+
+etykiety_agnes_comp_3 <- cutree(Agnes_complete_Veh_3, k=3)
+
+
+#Sprawdzenie z rzeczywistymi klasami
+tab_agnes_avg_3 <- table(etykiety_agnes_avg_3, Vehicle_etykiety)
+(dokl_agnes_3_average <- (compareMatchedClasses(etykiety_agnes_avg_3, Vehicle_etykiety)$diag) )
+
+
+tab_agnes_complete_3 <- table(etykiety_agnes_comp_3, Vehicle_etykiety)
+(dokl_agnes_3_complete <- compareMatchedClasses(etykiety_agnes_comp_3, Vehicle_etykiety)$diag)
+```
+
+Wykorzystując funkcję *compareMatchedClasses* otrzymujemy nieco lepszy wynik dla metody `complete linkage` (`r round(dokl_agnes_3_complete,3)*100`%).
+
+```{r funkcja_agnes_rzeczywiste_etykiety_3, fig.height=4, fig.width=7, fig.cap="\\label{fig:agnes_avg_rzecz_etyk_3} Dendrogram z użyciem average linkage"}
+
+dendrogram_prawdziwe_etykiety_3 <- function(agnes_dane, metoda){
+
+dendrogram_dane <- as.dendrogram(agnes_dane)
+
+# kolory: rzeczywiste klasy
+etykietki_kolory <- as.numeric(Vehicle_etykiety)
+
+# kolory zgodnie z kolejnością obiektów  w dendrogramie
+kolory_obiektow <- etykietki_kolory[agnes_dane$order]
+
+# Porównanie: partycja na 4 skupienia vs. rzeczywiste klasy
+fviz_dend(dendrogram_dane, cex=0.15, k=3,  label_cols=kolory_obiektow, k_colors=c(1,2,3),
+          main=paste0("Partycja na 3 skupienia vs. rzeczywiste klasy ", metoda), lwd = 0.5)
+}
+
+dendrogram_prawdziwe_etykiety_3(Agnes_avg_Veh_3, " (average linkage)")
+```
+
+Wykorzystując metodę (wykres \ref{fig:agnes_avg_rzecz_etyk_3}) `average linkage` możemy zaobserwować dwa główne klastry (trzeci klaster od lewej zawiera jedynie dwie obserwacje).
+
+```{r funkcja_agnes_rzeczywiste_etykiety_3_comp, fig.height=4, fig.width=7, fig.cap="\\label{fig:agnes_comp_rzecz_etyk_3} Dendrogram z użyciem complete linkage"}
+
+dendrogram_prawdziwe_etykiety_3(Agnes_complete_Veh_3, " (complete linkage)")
+
+```
+
+Korzystając z metody (wykres \ref{fig:agnes_avg_rzecz_etyk_3}) `complete linkage` możemy zaobserwować, że do klastra *zielonego*
+zostało przydzielonych więcej obserwacji.
+
+```{r klastry_agnes_PCA_comp_3, fig.height=3, fig.cap="\\label{fig:agnes_PCA_comp_3} Rzutowanie klastrów uzyskanych metodą AGNES (complete linkage) na wykres PCA"}
+fviz_cluster(list(data=Vehicle_scaled, cluster=etykiety_agnes_comp_3), repel = FALSE,
+             geom = "point" , main = "Klastrowanie z wykorzystaniem AGNES (complete linkage)")
+
+```
+
+Wyniki dla `complete linkage` (wykres \ref{fig:agnes_PCA_comp_3}) możemy zauważyć częściowe nakładanie się rzutów klastrów. Separacja przestrzenna jest gorsza niż dla `k-means` i `PAM`.
+
+
+```{r silhouette_agnes_avg_3, fig.height=3, fig.cap="\\label{fig:agnes_sil_avg_3}Silhouette AGNES (average linkage), K=3, avg.width = 0.36" }
+#Wykresy silhouette
+
+sil_agnes_k3_avg <- silhouette(etykiety_agnes_avg_3, dist = dist(Vehicle_scaled))
+
+
+fviz_silhouette(sil_agnes_k3_avg, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla AGNES: average linkage (K=3)", subtitle = paste0("Średnia szerokość silhouette: ", round(mean(sil_agnes_k3_avg[,3]),2))) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+Średnia wartość silhouette dla metody `average linkage` (wykres \ref{fig:agnes_sil_avg}) wynosi **0.36**, co jest najwyższym uzyskanym dotąd wynikiem. Niemal wszystkie obserwajce z klastra **3** mają wartości powyżej średniej, co wskazuje na dobrą spójność. Spora część obserwacji z klastra **2** ma wartości ujemne (w tym klastrze przyjmowane wartości `silhouette` są też niższe niż w pozostałych klastrach).
+
+```{r silhouette_agnes_comp_3, fig.height=3, fig.cap="\\label{fig:agnes_sil_comp_3} Silhouette AGNES (complete linkage), K=3, avg.width = 0.28"}
+sil_agnes_k3_comp <- silhouette(etykiety_agnes_comp_3, dist = dist(Vehicle_scaled))
+
+fviz_silhouette(sil_agnes_k3_comp, print.summary = FALSE, label = FALSE) +
+  ggtitle("Wykres silhouette dla AGNES: complete linkage (K=3)",
+          subtitle = paste0("Średnia szerokość silhouette: ", round(mean(sil_agnes_k3_comp[,3]),2))) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+
+### Szukanie cech wyróżniających klastry
+
+Wybieramy metodę `k-means` dla **K=3** i stosujemy funkcję *ggpairs* aby stworzyć zestawienie wybranych zmiennych w celu wyszczególnienia cech, które wyróżniają dane klastry.
+
+```{r wybrane_zmienne_ggpairs_1, fig.height=5, fig.width=7, fig.cap = "\\label{fig:ggpairs_1} Zestawienie wybranych cech z podziałem na klastry (K=3)"}
+Vehicle_clust_3_kmeans <- as.data.frame(Vehicle_scaled)
+Vehicle_clust_3_kmeans$Cluster <- as.factor(kmeans_k3$cluster)
+
+ggpairs(Vehicle_clust_3_kmeans, columns = c(7,8, 19), aes(col = Cluster), legend = 1) + 
+  theme(legend.position = "bottom")
+```
+
+```{r wybrane_zmienne_ggpairs_2, fig.height=5, fig.width=7, fig.cap = "\\label{fig:ggpairs_2} Zestawienie wybranych cech z podziałem na klastry (K=3)"}
+ggpairs(Vehicle_clust_3_kmeans, columns = c(9,11, 19), aes(col = Cluster), legend = 1) + 
+  theme(legend.position = "bottom")
+```
+
+Analizując wykresy \ref{fig:ggpairs_1} i \ref{fig:ggpairs_2} możemy zauważyć, że klaster **2** wyróżnia się znacząco od pozostałych klas (patrząc na wykresy pudełkowe i rozkłady gęstości). Natomiast klaster **1** i **2** ma bardzo zbliżone rozkłady. Zatem zmienne `Elong`, `Scat.Ra`, `Pr.Axis.Rect` oraz `Sc.Var.Maxis` mogą być podstawą do odróżnienia obserwacji zawartych w klastrze **2** od pozostałych obserwacji.
+
+### Analiza centroidów i medoidów
+
+
+```{r centroidy_medoidy, results='asis'}
+
+centroidy <- kmeans_k3$centers
+medoidy <- Vehicle_scaled[Vehicle_pam_3$id.med, ]
+
+etykiety_medoidow <- Vehicle_etykiety[Vehicle_pam_3$id.med]
+
+format_3digits <- function(x) {
+  if(is.numeric(x)) {
+    formatC(x, format = "g", digits = 3)
+  } else {
+    x
+  }
+}
+
+tabela_reprezentanci <- data.frame(
+  Metoda = c(rep("k-means", 3), rep("PAM", 3)),
+  Klaster = rep(1:3, 2),
+  rbind(
+    as.data.frame(apply(centroidy, 2, format_3digits)),
+    as.data.frame(apply(medoidy, 2, format_3digits))
+  ),
+  Etykieta = c(rep(NA, 3), etykiety_medoidow),
+  stringsAsFactors = FALSE
+)
+
+# Część 1 tabeli (kolumny 1-11)
+print(xtable(tabela_reprezentanci[, 1:12],
+             caption = "Centroidy (k-means) i medoidy (PAM) z rzeczywistymi etykietami (część 1)"),
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      scalebox = 0.8,
+      comment = FALSE,
+      sanitize.text.function = function(x) x)
+
+# Część 2 tabeli (kolumny 1,2 + 12+)
+print(xtable(tabela_reprezentanci[, c(1, 2, 13:ncol(tabela_reprezentanci))],
+             caption = "Centroidy (k-means) i medoidy (PAM) z rzeczywistymi etykietami (część 2)"),
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      scalebox = 0.8,
+      comment = FALSE,
+      sanitize.text.function = function(x) x)
+```
+
+
+
+```{r srednie_w_klastrach, results='asis'}
+srednie_na_klaster <- function(dane, grupy) {
+  aggregate(dane, by = list(grupy), FUN = mean)
+}
+
+srednie_kmeans <- srednie_na_klaster(Vehicle_scaled, kmeans_k3$cluster)
+srednie_pam <- srednie_na_klaster(Vehicle_scaled, Vehicle_pam_3$clustering)
+
+# Łączenie wyników
+tabela_srednie <- cbind(
+  "Metoda" = c(rep("k-means", 3), rep("PAM", 3)),
+  "Klaster" = rep(1:3, 2),
+  rbind(srednie_kmeans[,-1], srednie_pam[,-1])
+)
+
+print(xtable(tabela_srednie[, 1:12],
+      caption = "Średnie wartości cech (część 1)"),
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      scalebox = 0.8,
+      comment = FALSE)
+
+# Druga połowa kolumn
+print(xtable(tabela_srednie[, c(1, 2, 13:ncol(tabela_srednie))],
+      caption = "Średnie wartości cech (część 2)"),
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      scalebox = 0.8,
+      comment = FALSE)
+```
+
+
+
+Analizując centroidy (dla metody k-means) i medoidy (dla metody PAM) z tabel 8-11, można zauważyć, że zmienne Comp, Circ, D.Circ, Rad.Ra i Sc.Var.Maxis, Max.L.Rect dobrze odróżniają klaster *2* (w przypadku k-means). Dla klastra *2* obserwujemy dodatnie wartości, natomiast dla pozostałych klastrów wartości te są ujemne. Zmienne Skew.Maxis, Kurt.Maxis
+ Holl.Ra dla klastra *1* przyjmują natomiast wartości odmienne od klastrów *2* i *3*.
+ 
+ \vspace{1cm}
+
+Natomiast w przypadku medoidów zmienne  Comp, Circ, D.Circ, Rad.Ra rozróżniają dobrze obserwacje dla klastra *1* od pozostałych. 
+
+Różnice te wynikają z innej numeracji klastrów dla metod k-means i PAM.
+
+
+
+### Wnioski
+
+
+* Średnia wartość wskaźnika Silhouette dla K=3 wyniosła 0.29, co wskazuje na umiarkowaną jakość grupowania. Metoda ta dobrze separowała klaster odpowiadający klasie "bus", ale miała problemy z rozróżnieniem klas "opel" i "saab", które silnie się nakładały.
+
+* Trafność klasyfikacji K-means dla 3 klastrów wyniosła 53.5%, co jest przyzwoitym wynikiem, biorąc pod uwagę trudność separacji danych.
+
+* W przypadku PAM, średnia wartość Silhouette dla K=3 była taka sama jak dla k-means (0.29), ale rozkład wartości wskaźnika był nieco gorszy (więcej obserwacji z ujemnymi wartościami).
+
+* Trafność klasyfikacji dla PAM wyniosła 54.7%, co jest minimalnie lepsze niż k-means.
+
+* Metoda PAM okazała się bardziej odporna na obserwacje odstające niż k-means, ale nadal nie radziła sobie dobrze z nakładającymi się klasami.
+
+* Average linkage. Najlepsza średnia wartość Silhouette (0.36 dla K=3), co mogło sugerować lepszą spójność klastrów niż w przypadku k-means i PAM. Trafność klasyfikacji wyniosła jednak tylko 49.1%, co może wynikać z problemów z przypisaniem obserwacji do odpowiednich klas.
+
+* Complete linkage. Średnia wartość Silhouette wyniosła 0.28, a trafność klasyfikacji 52.2%. Lepiej radziła sobie z równomiernym podziałem danych niż average linkage, ale nadal nie była idealna.
+
+* Single linkage. Najgorsza metoda – średnia wartość Silhouette wyniosła zaledwie 0.08, a trafność klasyfikacji była bardzo niska.
+
+* AGNES (average linkage) – dała najwyższą średnią wartość Silhouette, co wskazuje na najlepszą spójność klastrów.
+
+* Większość metod (zwłaszcza k-means i PAM) lepiej separowała dane przy K=3.
+
+* Wniosek końcowy: W przypadku tego zbioru danych k-means i PAM są lepszym wyborem niż metody hierarchiczne, ale żadna metoda nie osiągnęła bardzo wysokiej skuteczności ze względu na trudną do separacji strukturę danych.
+
