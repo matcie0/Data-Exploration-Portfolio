@@ -1,0 +1,1284 @@
+---
+title: "Sprawozdanie z listy nr 2"
+author: "Dawid Skowroński 282241, Mateusz Cieślak 272633"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    number_sections: true
+  word_document: default
+  html_document:
+    df_print: paged
+subtitle: Eksploracja Danych
+toc: true
+lof: true
+lot: true
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{float}
+- \usepackage{graphicx}
+- \usepackage[OT4]{polski}
+- \usepackage[utf8]{inputenc}
+- \renewcommand{\contentsname}{Spis treści}
+- \renewcommand{\listfigurename}{Spis wykresów}
+- \renewcommand{\listtablename}{Spis tabel}
+- \renewcommand{\figurename}{Wykres}
+- \renewcommand{\tablename}{Tabela}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  fig.width = 6,
+  fig.height = 3,
+  out.extra='',
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE)
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "", fig.align = "center")
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE)
+knitr::opts_chunk$set(
+  dev='png',
+  dpi = 200)
+```
+
+```{r biblioteki}
+library(factoextra)
+library(corrplot)
+library(VIM)
+library(tinytex)
+library(knitr)
+
+library(e1071)
+library(arules)
+library(scatterplot3d)
+library(reshape2)
+library(cluster)
+library(MASS)
+
+library(patchwork)
+library(ggplot2)
+library(ggrepel)
+library(ggmosaic)
+library(xtable)
+library(tidyr)
+library(dplyr)
+library(gridExtra)
+library(xtable)
+library(knitr)
+library(kableExtra)
+```
+
+
+# Zadanie 1
+## Wczytanie i wstępne przygotowanie danych
+
+```{r przedstawienie_danych_iris, results='asis'}
+data("iris")
+
+struktura_danych_iris <- data.frame(
+  Zmienna = names(iris),
+  Opis = c("Długość działki kielicha", "Szerokośc działki kielicha", "Długość płatka", "Szerokość płatka", "Gatunek irysa"),
+  Typ = sapply(iris, function(x) paste(class(x), collapse = ", ")),
+  Przykładowe_wartości = sapply(iris, function(x) paste(head(x, 4), collapse = ", "))
+)
+
+library(xtable)
+xtable_iris <- xtable(
+  struktura_danych_iris,
+  caption = "Struktura zbioru danych iris",
+  label = "tab:irysy_opis",
+  align = c("l", "l", "l", "l", "l")
+)
+
+print(xtable_iris,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      comment = FALSE,
+      sanitize.colnames.function = function(x){
+        c("Zmienna", "Opis","Typ","Przykładowe wartości")
+      })
+```
+
+Zbiór danych `iris` zawiera pomiary o dla trzech gatunków irysów (`setosa`, `virginica`, `versicolor`).
+Opis poszczególnych zmiennych wraz z przykładkowymi wartościami przedstawiony jest w tabeli \ref{tab:irysy_opis}.
+
+Celem analizy jest:
+
+* Wybranie cechy o najlepszej i najgorszej zdolności dyskryminacyjnej.
+
+* Porównanie skuteczności nienadzorowanych metod dyskretyzacji (`equal width`, `equal frequency`, `k-means`, `przedziały zadane przez użytkownika`).
+
+* Ocena, czy wyniki różnią się w zależności od jakości danej cechy.
+
+Sprawdzamy czy w zbiorze występują wartości brakujące
+
+```{r sprawdzanie_danych_1, results='asis'}
+# Brak obserwacji odstających
+# Po 50 obserwacji z każdego gatunku
+
+dane_brakujace <- data.frame(
+  zmienna = names(iris),
+  "liczba wartości brakujących" = as.integer(colSums(is.na(iris)))  
+)
+
+tabela_xtable <- xtable(
+  dane_brakujace,
+  caption = "Wartości brakujące w zbiorze iris",
+  label = "tab:tabela1",
+  align = c("c", "c", "c")  
+)
+
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",      
+      size = "normalsize",
+      comment = FALSE,
+      digits = c(0, 0, 0),
+      sanitize.colnames.function = function(x){
+        c("zmienna", "liczba NA")
+      })
+      
+```
+
+```{r sprawdzanie_danych_2, results='asis'}
+dane_gatunki <- as.data.frame(table(iris$Species))
+names(dane_gatunki) <- c("gatunek", "liczba obserwacji") 
+
+tabela_xtable <- xtable(
+  dane_gatunki,
+  caption = "Liczba obserwacji w zbiorze iris ze względu na gatunek",
+  label = "tab:tabela2",
+  align = c("c", "c", "c")  
+)
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",
+      size = "normalsize",
+      comment = FALSE,
+      sanitize.colnames.function = function(x){
+        c("zmienna", "liczba obserwacji")
+      })
+```
+
+Analizując tabelę \ref{tab:tabela1} nie zauważamy wartości `NA`. Dodatkowo liczba obserwacji w zbiorze iris jest równoliczna ze względu na gatunek, co obrazuje tabela \ref{tab:tabela2}.
+
+## Wybór cech
+
+```{r konwersja_ramki_iris, include=TRUE, fig.width=6, fig.height=6, fig.cap="\\label{fig:pudelkowe_irysy} Wykresy pudełkowe przedstawiające rozkład poszczególnych cech zbioru iris z podziałem na gatunki"}
+iris_long <- pivot_longer(iris,cols = -Species, names_to = "Zmienna", values_to = "Wartość")
+ggplot(iris_long, aes(x = Species, y = Wartość, fill = Species)) +
+  geom_boxplot() +
+  facet_wrap(~Zmienna, scales = "free_y") +
+  ggtitle("Rozkłady cech względem poszczególnych gatunków")+
+  labs(x="Gatunki")+
+  theme_minimal()
+
+```
+
+Z wykresów \ref{fig:pudelkowe_irysy} możemy zaobserwować, która zmienna ma najlepsze zdolności dyskryminacyjne.
+Najlepszą cechą wydaję się być `Petal.Length`. Wykresy pudełkowe najmniej na siebie nachodzą, zauważalne są duże różnice między gatunkami (w szczególności między gatunkiem `setosa` a pozostałymi). Jedynie w grupach `versicolor` i `virginica` występuje nieznaczne nakładanie się wartości przyjmowane przez tę zmienną.
+
+Cechą o najgorszej zdolności dyskryminacyjnej wydaje się być zmienna `Sepal.Width`. Rozkłady zmiennych pokrywają się w znacznej części, może to zaburzyć klarowność dyskretyzacji. W szczególności, w grupie `setosa` i `virginica` można zauważyć obserwacje odstające, których wartości pokrywają się z wartościami w innych grupach.
+
+
+## Porównanie metod dyskretyzacji nienadzorowanej
+
+### Zmienna Petal.Length
+
+Ustalamy docelową liczbę przedziałów na 3 i dokonujemy dyskretyzacji zmiennej `Petal.Length` metodą opartą na równych częstościach
+
+```{r Rozrzut ptl_len, fig.cap="\\label{fig:rozrzut_ptl_len}Wykres rozrzutu zmiennej Petal.Length", fig.width=5, fig.height=3}
+# Podzbiór Petal.Length
+ptl.len <- iris[,"Petal.Length"]
+n <- length(ptl.len)
+y <- runif(n)
+
+wykres_ptl_len <- ggplot(iris, aes(x = Petal.Length, y = y)) +
+  geom_jitter(height = 0.1, width = 0, alpha = 0.6, color = "black") +
+  labs(title = "Rozrzut zmiennej Petal.Length",
+       x = "Długość płatka (Petal.Length)",
+       y = "") +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+wykres_ptl_len
+```
+
+Wykres \ref{fig:rozrzut_ptl_len} obrazuje rozproszenie zmiennej `Petal.Length` (dla przejrzystości zastosowano losowe rozmieszczenie punktów względem współrzędnej `y`). Już we wstępnej analizie możemy zauważyć, że dane rozmieszczone są w dwóch "skupiskach".
+
+```{r jednakowa_licznosc, fig.cap="\\label{fig:wykl_ptl_len_licznosc} Dyskretyzacja zmiennej Petal.Length oparta na jednakowej częstości. Porównanie z rzeczywistymi klasami"}
+ptl_len_equal_freq <- discretize(ptl.len, breaks = 3)
+brks_eq_freq <- attributes(ptl_len_equal_freq)$"discretized:breaks"
+
+
+ggplot(data = iris, aes(x = Petal.Length, y = y, color = Species)) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = brks_eq_freq,
+    color = "red",
+    linewidth = 0.5,
+    linetype = "solid"
+  ) +
+  labs(
+    title = "Metoda oparta na równych częstościach",
+    x = "Długość płatka",
+    y = ""
+  ) +
+  scale_color_manual(
+    name = "Gatunek irysa",
+    values = c("setosa" = "purple", "versicolor" = "black", "virginica" = "deepskyblue")
+  ) +
+  theme_minimal() 
+
+```
+
+Stosujące metodę opartą na przedziałach o jednakowej szerokości możemy zaobserwować bardzo dobrą dyskretyzację zmiennej `Sepal.Length`. Widoczna jest całkowita separacja klasy `setosa`. Pozostałe gatunki również są bardzo dobrze odseparowane.  
+
+```{r rowne_przedzialy, fig.cap="\\label{fig:wykr_ptl_len_dlugosc} Dyskretyzacja zmiennej Petal.Length oparta na przedziałach jednakowej długośći. Porównanie z rzeczywistymi klasami"}
+ptl_len_eq_wid <- discretize(ptl.len, method = "interval", breaks = 3)
+brks_eq_wid <- attributes(ptl_len_eq_wid)$"discretized:breaks"
+
+ggplot(data = iris, aes(x = Petal.Length, y = y, color = Species)) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = brks_eq_wid,
+    color = "red",
+    linewidth = 0.5,
+    linetype = "solid"
+  ) +
+  labs(
+    title = "Metoda oparta na równych przedziałach",
+    x = "Długość płatka",
+    y = ""
+  ) +
+  scale_color_manual(
+    name = "Gatunek irysa",
+    values = c("setosa" = "purple", "versicolor" = "black", "virginica" = "deepskyblue")
+  ) +
+  theme_minimal() 
+```
+
+Stosując metodę opartą na przedziałach jednakowej długości uzyskujemy wyniki zbliżone co do metody opartej na równolicznych przedziałach.
+
+```{r k_srednich, fig.cap="\\label{fig:wykl_ptl_len_srednie} Dyskretyzacja zmiennej Petal.Length oparta na metodzie k-średnich. Porównanie z rzeczywistymi klasami"}
+set.seed(111) #Dla powtarzalności wyniku
+ptl_len_eq_means <- discretize(ptl.len, method = "cluster", breaks = 3)
+brks_eq_means <- attributes(ptl_len_eq_means)$"discretized:breaks"
+
+ggplot(data = iris, aes(x = Petal.Length, y = y, color = Species)) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = brks_eq_means,
+    color = "red",
+    linewidth = 0.5,
+    linetype = "solid"
+  ) +
+  labs(
+    title = "Metoda k-średnich",
+    x = "Długość płatka",
+    y = ""
+  ) +
+  scale_color_manual(
+    name = "Gatunek irysa",
+    values = c("setosa" = "purple", "versicolor" = "black", "virginica" = "deepskyblue")
+  ) +
+  theme_minimal() 
+
+```
+
+Metoda oparta na k-średnich (wykres \ref{fig:wykl_ptl_len_srednie}) zwraca zbliżone rezultaty jak metoda równolicznych przedziałów i jednakowych odległości. 
+
+```{r zadane_przedzialy, fig.cap="\\label{fig:wykl_ptl_len_zadane} Dyskretyzacja zmiennej Petal.Length oparta na zadanych ręcznie przedziałach. Porównanie z rzeczywistymi klasami"}
+
+ptl_len_usr <- discretize(ptl.len, method = "fixed", breaks = c(0, 2.5, 4.5, Inf),
+                          labels = c("małe","średnie", "duże"))
+brks_eq_usr <- attributes(ptl_len_usr)$"discretized:breaks"
+
+ggplot(data = iris, aes(x = Petal.Length, y = y, color = Species)) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = brks_eq_usr,
+    color = "red",
+    linewidth = 0.5,
+    linetype = "solid"
+  ) +
+  labs(
+    title = "Podział zadany ręcznie",
+    x = "Długość płatka",
+    y = ""
+  ) +
+  scale_color_manual(
+    name = "Gatunek irysa",
+    values = c("setosa" = "purple", "versicolor" = "black", "virginica" = "deepskyblue")
+  ) +
+  theme_minimal() 
+```
+
+Dokładność metody opartej na przedziałach zadanych przez użytkownika (wykres \ref{fig:wykl_ptl_len_zadane}) zwraca nieco gorsze wyniki (część obserwacji z gatunku `versicolor` znajduje się w klastrze gatunku `virginica`). W przypadku zmiennej `Sepal.Length` dyskretyzacja gatunku `setosa` jest intuicyjna, gdyż jest odseparowana od pozostałych gatunków. Lecz zadanie przedziałów dla pozostałych zmiennych jest kwestią subiektywną, przez co dokładność tej metody może się znacznie wahać.
+
+```{r mozaikowe_dyskretyzacja,fig.cap="\\label{fig:wykl_ptl_len_porownanie}Porównanie metod dyskretyzacji zmiennej Petal.Length - wykresy mozaikowe",fig.width=6,fig.height=6}
+#Dodajemy nazwę gatunku
+wyk_mozaikowy <- function( zb_dyskretyzacja, tytul, zmienna ="" ){
+
+dane <- data.frame(
+  Species = iris$Species,
+  Petal_Length_przedzialy = zb_dyskretyzacja
+)
+
+ggplot(dane, aes(x = Petal_Length_przedzialy, fill = Species)) +
+  geom_bar(position = "stack") +
+  geom_label_repel(
+    aes(label = after_stat(count)),
+    stat = "count",
+    position = position_stack(vjust = 0.5),
+    size = 3,
+    min.segment.length = 0,
+    box.padding = 0.1
+  )+
+  scale_fill_manual(
+    values = c("setosa" = "green3", 
+               "versicolor" = "orange", 
+               "virginica" = "deepskyblue"),
+    name = "Gatunek"
+  ) +
+  labs(
+    title = tytul,
+    x = zmienna,
+    y = "Liczba obserwacji",
+    size=8
+  ) +
+  theme_minimal() +
+  theme( axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        plot.title = element_text(hjust = 0.5, face = "bold",size = 8),
+        legend.position = "right")
+}
+
+moz1 <- wyk_mozaikowy(ptl_len_equal_freq, "Rozkład gatunków irysów w równolicznych \n przedziałach dyskretyzacji", "Przedziały długości płatka")
+moz2 <- wyk_mozaikowy(ptl_len_eq_wid, "Rozkład gatunków irysów w \n przedziałach dyskretyzacji o równej długości", "Przedziały długości płatka")
+moz3 <- wyk_mozaikowy(ptl_len_eq_means, "Rozkład gatunków irysów w przedziałach \n dyskretyzacji wyznaczonych metodą k-średnich", "Przedziały długości płatka")
+moz4 <- wyk_mozaikowy(ptl_len_usr,"Rozkład gatunków irysów w ręcznie \n wyznaczonych przedziałach dyskretyzacji", "Przedziały długości płatka")
+(moz1/moz2)|(moz3/moz4)
+```
+
+Wykresy mozaikowe \ref{fig:wykl_ptl_len_porownanie} podsumowują wszystkie metody dyskretyzacji zastosowane dla zmiennej `Petal.Length` oraz rozłożenie gatunków irysów w poszczególnych. Możemy zauważyć, że podział gatunków jest najmniej klarowny dla metody ręcznie wyznaczonych przedziałów. Drugą najgorszą metodą jest ta oparta na równych przedziałach.
+```{r porownanie_dyskretyzacji_petal, results='asis'}
+m1 <- compareMatchedClasses(iris$Species, ptl_len_equal_freq)$diag
+
+m2 <- compareMatchedClasses(iris$Species, ptl_len_eq_wid)$diag
+
+m3 <- compareMatchedClasses(iris$Species, ptl_len_eq_means)$diag
+
+m4 <- compareMatchedClasses(iris$Species, ptl_len_usr)$diag
+
+mac_zgodnosci <- data.frame(metoda = c("Równa liczność","Równe przedziały",
+                                       "Metoda k-średnich", "Ręcznie ustalone przedziały"),
+                            wsp_zgodnosci = c(m1,m2,m3,m4))
+tabela_xtable <- xtable(
+  mac_zgodnosci,
+  caption = "Zgodność przypisania obiektów do poszczególnych grup (zmienna Sepal.Width)",
+  label = "tab:tabela_porownanie_ptl_len",
+  align = c("c", "c", "c"),  
+  digits = c(0, 0, 4) )
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      size = "normalsize",
+      comment = FALSE,
+      sanitize.colnames.function = function(x) {
+        c("Metoda", "Współczynnik zgodności") })
+```
+
+Tebela \ref{tab:tabela_porownanie_ptl_len} przedstawia współczynniki zgodności dla wszystkich metod dyskretyzacji. Możemy zauważyć że zarówna metoda k-średnich jak i metoda równolicznych przedziałów zwraca najlepszą zgodność (**`r round(m1,3)`**) z rzeczywistymi klasami (gatunkami). Potwierdza to wstępną obserwację z wykresów pudełkowych - `Petal.Length` naturalnie dobrze separuje gatunki. Wszystkie metody skutecznie oddzielają `setosa`, problemem jest głównie nakładanie `versicolor` i `virginica`
+
+### Zmienna Sepal.Width
+
+Dla zmiennej `Sepal.Width` przeprowadzamy podobną analizę.
+
+```{r rozrzut_sep_wid, fig.cap="\\label{fig:wyk_rozrzut_sep_wid} Wykres rozrzutu zmiennej Sepal.Width", fig.width=5, fig.height=3}
+# Podzbiór Sepal.Width
+spl.wid <- iris[,"Sepal.Width"]
+m <- length(spl.wid)
+y <- runif(m)
+
+wykres_spl_wid <- ggplot(iris, aes(x = Sepal.Width, y = y)) +
+  geom_jitter(height = 0.1, width = 0, alpha = 0.6, color = "black") +
+  labs(title = "Rozrzut zmiennej Sepal.Width",
+       x = "Długość płatka (Sepal.Width)",
+       y = "") +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+wykres_spl_wid
+```
+
+Wykres \ref{fig:wyk_rozrzut_sep_wid} przedstawia rozrzut zmiennej `Sepal.Width`. W przypadku tej zmiennej podział danych na skupiska nie występuje.
+
+```{r jednakowa_licznosc_sepal, fig.cap="\\label{fig:wykl_sep_wid_licznosc} Dyskretyzacja zmiennej Sepal.Width oparta na jednakowej częstości. Porównanie z rzeczywistymi klasami"}
+spl_wid_equal_freq <- discretize(spl.wid, breaks = 3)
+spl_brks_eq_freq <- attributes(spl_wid_equal_freq)$"discretized:breaks"
+
+
+ggplot(data = iris, aes(x = Sepal.Width, y = y, color = Species)) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = spl_brks_eq_freq,
+    color = "red",
+    linewidth = 0.5,
+    linetype = "solid"
+  ) +
+  labs(
+    title = "Metoda oparta na równych częstościach",
+    x = "Szerokość działki kielicha",
+    y = ""
+  ) +
+  scale_color_manual(
+    name = "Gatunek irysa",
+    values = c("setosa" = "purple", "versicolor" = "black", "virginica" = "deepskyblue")
+  ) +
+  theme_minimal() 
+
+```
+
+
+```{r rowne_przedzialy_sepal, fig.cap="\\label{fig:wykl_sep_wid_dlugosc} Dyskretyzacja zmiennej Sepal.Width oparta na przedziałach jednakowej długośći. Porównanie z rzeczywistymi klasami"}
+
+spl_wid_eq_wid <- discretize(spl.wid, breaks = 3,method = "interval")
+spl_brks_eq_wid <- attributes(spl_wid_eq_wid)$"discretized:breaks"
+
+ggplot(data = iris, aes(x = Sepal.Width, y = y, color = Species)) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = spl_brks_eq_wid,
+    color = "red",
+    linewidth = 0.5,
+    linetype = "solid"
+  ) +
+  labs(
+    title = "Metoda oparta na równych przedziałach",
+    x = "Szerokość działki kielicha",
+    y = ""
+  ) +
+  scale_color_manual(
+    name = "Gatunek irysa",
+    values = c("setosa" = "purple", "versicolor" = "black", "virginica" = "deepskyblue")
+  ) +
+  theme_minimal() 
+```
+
+
+```{r k_srednich_sepal, fig.cap="\\label{fig:wykl_sep_wid_srednie} Dyskretyzacja zmiennej Sepal.Width oparta na metodzie k-średnich. Porównanie z rzeczywistymi klasami" }
+set.seed(111)
+spl_wid_means <- discretize(spl.wid, breaks = 3,method = "cluster")
+spl_brks_means <- attributes(spl_wid_means)$"discretized:breaks"
+
+ggplot(data = iris, aes(x = Sepal.Width, y = y, color = Species)) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = spl_brks_means,
+    color = "red",
+    linewidth = 0.5,
+    linetype = "solid"
+  ) +
+  labs(
+    title = "Metoda k-średnich",
+    x = "Szerokość działki kielicha",
+    y = ""
+  ) +
+  scale_color_manual(
+    name = "Gatunek irysa",
+    values = c("setosa" = "purple", "versicolor" = "black", "virginica" = "deepskyblue")
+  ) +
+  theme_minimal() 
+```
+
+
+```{r zadane_przedzialy_sepal, fig.cap="\\label{fig:wykl_sep_wid_zadane} Dyskretyzacja zmiennej Sepal.Width oparta na zadanych ręcznie przedziałach. Porównanie z rzeczywistymi klasami"}
+spl_wid_usr <- discretize(spl.wid,method = "fixed", breaks = c(1,2.7,3.5,Inf), labels = c("małe","średnie","duże"))
+spl_brks_usr <- attributes(spl_wid_usr)$"discretized:breaks"
+
+ggplot(data = iris, aes(x = Sepal.Width, y = y, color = Species)) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = spl_brks_usr,
+    color = "red",
+    linewidth = 0.5,
+    linetype = "solid"
+  ) +
+  labs(
+    title = "Przedziały zadane ręcznie",
+    x = "Szerokość działki kielicha",
+    y = ""
+  ) +
+  scale_color_manual(
+    name = "Gatunek irysa",
+    values = c("setosa" = "purple", "versicolor" = "black", "virginica" = "deepskyblue")
+  ) +
+  theme_minimal() 
+```
+
+Analizując wykresy \ref{fig:wykl_sep_wid_licznosc},\ref{fig:wykl_sep_wid_dlugosc},\ref{fig:wykl_sep_wid_srednie} oraz \ref{fig:wykl_sep_wid_zadane} zastosowania metod dyskretyzacji dla zmiennej `Sepal.Width` żadna z nich nie wykazuje dobrego wyodrębnienia na poszczególne gatunki.
+
+```{r mozaikowe_sepal, fig.width=7, fig.height=6, fig.cap="\\label{fig:wykl_sep_wid_porownanie}Porównanie metod dyskretyzacji zmiennej Sepal.Width - wykresy mozaikowe"}
+sep_moz1 <- wyk_mozaikowy(spl_wid_equal_freq, "Rozkład gatunków irysów w równolicznych \n przedziałach dyskretyzacji", "Przedziały szerokości działki kielicha")
+sep_moz2 <- wyk_mozaikowy(spl_wid_eq_wid, "Rozkład gatunków irysów w \n przedziałach dyskretyzacji o równej długości", "Przedziały szerokości działki kielicha")
+sep_moz3 <- wyk_mozaikowy(spl_wid_means, "Rozkład gatunków irysów w przedziałach \n dyskretyzacji wyznaczonych metodą k-średnich", "Przedziały szerokości działki kielicha")
+sep_moz4 <- wyk_mozaikowy(spl_wid_usr,"Rozkład gatunków irysów w ręcznie \n wyznaczonych przedziałach dyskretyzacji", "Przedziały szerokości działki kielicha")
+(sep_moz1/sep_moz2)|(sep_moz3/sep_moz4)
+```
+
+Wykresy mozaikowe \ref{fig:wykl_sep_wid_porownanie} wyraźnie pokazują, że żadna metoda dyskretyzacji Sepal.Width nie osiąga tak czystej separacji jak dla `Petal.Length`. Wszystkie wykresy pokazują silne nakładanie się gatunków w przedziałach. 
+
+```{r porownanie_dyskretyzacji_sepal, results='asis'}
+met1 <- compareMatchedClasses(iris$Species, spl_wid_equal_freq)$diag
+met2 <- compareMatchedClasses(iris$Species, spl_wid_eq_wid)$diag
+met3 <- compareMatchedClasses(iris$Species, spl_wid_means)$diag
+met4 <- compareMatchedClasses(iris$Species, spl_wid_usr)$diag
+
+mac_zgodnosci <- data.frame(metoda = c("Równa liczność","Równe przedziały", "Metoda k-średnich", "Ręcznie ustalone przedziały"),
+                            wsp_zgodnosci = c(met1,met2,met3,met4))
+tabela_xtable <- xtable(
+  mac_zgodnosci,
+  caption = "Zgodność przypisania obiektów do poszczególnych grup (zmienna Sepal.Width)",
+  label = "tab:tabela4",
+  align = c("c", "c", "c"),
+  digits = c(0, 0, 4)   
+)
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      size = "normalsize",
+      comment = FALSE,
+      sanitize.colnames.function = function(x) {
+        c("Metoda", "Współczynnik zgodności") })
+```
+
+Zestawienie metod dyskretyzacji w tabeli \ref{tab:tabela4} pokazuje, że żadna z metod nie osiąga zadowalającej separacji gatunków. Najlepszą metodą spośród wszystkich (współczynnik zgodności **`r met1`**). Najgorszy współczynnik ma natomiast mają natomiast przedziały ustalone ręcznie (**`r  round(met4,3)`**).
+
+## Wnioski
+
+Analiza wyraźnie pokazuje, że skuteczność metod dyskretyzacji silnie zależy od właściwości dyskryminacyjnych samej cechy.
+
+* Długość płatka `Petal.Length` skutecznie separuje poszczególne klasy.
+
+* Metoda równolicznych przedziałów jest najlepsza zarówno dla `Sepal.Width` jak i `Petal.Length`.
+
+* Najgorszą metodą w obu przypadkach jest ta, gdzie użytkownik wyznacza przedziały (jednak dokładność tej metody może się zmieniać).
+
+* Dla `Sepal.Width` nawet najlepsza metoda daje niezadowalające wyniki, co sugeruje, że sama dyskretyzacja dla tej zmiennej może być niewystarczająca, aby wyróżnić poszczególne gatunki irysów.
+
+
+# Zadanie 2
+
+## Wczytanie i wstępne przygotowanie danych
+
+```{r wczytanie-danych, echo=TRUE}
+qol_base <- read.csv(
+  file=paste0(getwd(),"/uaScoresDataFrame.csv" ),
+  header = TRUE,
+  stringsAsFactors = TRUE
+)
+
+# Usunięcie zbędnej kolumny
+qol <- qol_base[, -1]
+
+# Dane były zbierane jako ocena od różnych osób, więc to mało prawdopodobne, 
+# aby wszystkie osoby oceniły dany aspekt na 0. 
+# W takim wypadku zakładamy, że 0 to wartość brakująca / brak odpowiedzi w 
+# ankiecie.
+qol[qol == 0] <- NA
+
+# Sprawdzenie typów zmiennych
+str(qol)
+
+# Konwersja kolumn z typem factor na character 
+# (UA_Continent zostawiamy jako factor, bo jest tylko 6 poziomów)
+qol$UA_Name <- as.character(qol$UA_Name)
+qol$UA_Country <- trimws(as.character(qol$UA_Country))
+
+# Kolumny zawierające NA
+colSums(is.na(qol))
+
+# Liczba wierszy zawierających NA
+sum(apply(qol, 1, function(x) any(is.na(x))))
+
+
+# Mamy bardzo dużo wartości NA, większość znajduje się w kolumnie Venture.capital,
+# ale w innych kolumnach również. Jeśli chcielibyśmy je usunąć
+# pozbylibyśmy się 88 wierszy, więc zamiast tego użyjemy metody uzupełniania
+# wartości brakujących na podstawie najbliższych sąsiadów.
+
+qol_imputed <- kNN(qol, k = 5,imp_var = FALSE)
+
+# Rozróżnienie miast o tej samej nazwie
+qol$UA_Name[qol$UA_Name == "Birmingham" & qol$UA_Country == "United Kingdom"] <- "Birmingham (UK)"
+qol$UA_Name[qol$UA_Name == "Birmingham" & qol$UA_Country == "Alabama"] <- "Birmingham (Alabama)"
+qol$UA_Name[qol$UA_Name == "Portland" & qol$UA_Country == "Maine"] <- "Portland (Maine)"
+qol$UA_Name[qol$UA_Name == "Portland" & qol$UA_Country == "Oregon"] <- "Portland (Oregon)"
+
+# Rozróżnienie krajów o tej samej nazwie
+qol$UA_Country[qol$UA_Country == "Canada" & qol$UA_Continent == "North America"] <- "Canada (NA)"
+qol$UA_Country[qol$UA_Country == "Canada" & qol$UA_Continent == "Europe"] <- "Canada (EU)"
+qol$UA_Country[qol$UA_Country == "Georgia" & qol$UA_Continent == "North America"] <- "Georgia (NA)"
+qol$UA_Country[qol$UA_Country == "Georgia" & qol$UA_Continent == "Europe"] <- "Georgia (EU)"
+```
+
+## Eksploracja danych ilościowych
+
+```{r eksploracja-danych-ilosciowych, fig.width=8, fig.height=8.5, echo=FALSE, fig.cap="\\label{fig:pudelkowe_rozrzut}Wykresy pudełkowe przedstawiające rozkład poszczególnych cech zbioru City Quality of Life Dataset"}
+qol_ilosciowe <- qol_imputed[sapply(qol_imputed, is.numeric)]
+
+# Wykresy pudełkowe przed i po standaryzacji
+par(mfrow = c(2, 1), mar = c(9, 4, 4, 4))
+p1<-boxplot(qol_ilosciowe, las = 2, cex.axis = 1, main = "Przed standaryzacją")
+p2<-boxplot(scale(qol_ilosciowe), las = 2, cex.axis = 1, main = "Po standaryzacji")
+
+```
+
+
+W naszym przypadku zastosowanie standaryzacji było koniecznie, ponieważ zmienne mają różny rozrzut co widać na wykresie \ref{fig:pudelkowe_rozrzut}.
+
+## Analiza głównych składowych (PCA)
+
+```{r analiza-pca, fig.height=3.5, fig.width=4.5, fig.cap="\\label{fig:pudelkowe_pca}Wykresy pudełkowe przedstawiające rozrzut pierwszych trzech składowych PCA"}
+
+qol_standaryzowane <- scale(qol_ilosciowe)
+
+pca_wyniki <- prcomp(qol_standaryzowane)
+
+# Wykres pudełkowy pierwszych trzech składowych
+boxplot(pca_wyniki$x[, 1:3], main = "Rozrzut pierwszych trzech składowych PCA")
+
+kable(round(pca_wyniki$rotation[, 1:3], 3), digits = 3, caption = "\\label{tab:pca-ladunki} Ładunki pierwszych trzech głównych składowych (PCA)",
+      label = "tab:tabela_ładunki") %>%
+  kable_styling( full_width = FALSE)
+```
+
+Na podstawie tabeli \ref{tab:pca-ladunki} możemy wyciągnąć następujące wnioski wstępne:
+
+
+* PC1: może oznaczać komfort ekonomiczny vs. jakość instytucjonalna i środowiskowa.
+Miasta z wysoką wartością PC1 mają niższe koszty życia i mieszkania, ale również niższą jakość edukacji, wolności biznesowej i środowiska.
+
+* PC2: może oznaczać aktywność biznesową, startupową i kulturalna – mniejsze wartości PC2 to większa aktywność tych cech. Natomiast wyższe wartości PC2 oznaczają większą tolerancję, bezpieczeństwo i lepszą opiekę zdrowotną.
+
+* PC3: może oznaczać równowagę między siłą gospodarki a jakością życia (dostępność, bezpieczeństwo, dojazdy).
+
+
+
+## Skumulowana wariancja
+
+```{r wariancja,echo=FALSE,fig.height=4,fig.width=5, fig.cap="\\label{fig:skumulowana}Wykres słupkowy przedstawiający skumulowaną wariancję dla kolejnych składowych"}
+variance <- 100 * (pca_wyniki$sdev^2) / sum(pca_wyniki$sdev^2)
+cumulative.variance <- cumsum(variance)
+
+barplot(cumulative.variance, main = "Skumulowana wariancja (w %)",
+        names.arg = paste0("PC", 1:length(variance)))
+abline(h = 80, col = "green", lty = 2, lwd = 2)
+abline(h = 90, col = "red", lty = 2, lwd = 2)
+legend("right", legend = c("90%", "80%"), lwd = 2, lty = 2, bg="white", col = c("red", "green"))
+```
+
+Z wykresu \ref{fig:skumulowana} odczytujemy, że:
+
+* Do wyjaśnienia 80% całkowitej zmienności danych jest potrzebnych 7 składowych głównych.
+
+* Do wyjaśnienia 90% całkowitej zmienności danych jest potrzebnych 10 składowych głównych.
+
+## Wizualizacja zmiennych i miast w przestrzeni PCA
+
+```{r wizualizacja-pca, fig.width=10, fig.height=12.5, fig.cap="\\label{fig:pca}Wykres zmiennych PCA w przestrzeni 2d i wykres obserwacji PCA pogrupowany według kontynentu"}
+# Wektory zmiennych i miasta wg kontynentu
+library(patchwork)
+p1 <- fviz_pca_var(pca_wyniki, col.var = "contrib",
+                   title="Zmienne - PCA",
+                   gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                   labelsize = 4, repel = TRUE)
+
+p2 <- fviz_pca_ind(pca_wyniki, geom.ind = "point",
+                   title="Obserwacje - PCA",
+                   col.ind = qol_imputed$UA_Continent,
+                   label = "all", repel = TRUE, addEllipses = TRUE,
+                   legend.title = "Continent")
+
+p1/p2
+```
+
+
+
+PC1:
+Największe ładunki:
+
+* Cost.of.Living: +0.374
+* Housing: +0.314
+* Business.Freedom: -0.370
+* Education: -0.387
+* Environmental.Quality: -0.327
+
+Interpretacja PC1: Miasta z niskim kosztem życia i mieszkaniem są po prawej stronie osi PC1. Miasta z lepszą edukacją, wolnością gospodarczą i jakością środowiska są po lewej stronie.
+
+PC2:
+Największe ładunki:
+
+* Startups: -0.450
+* Venture.Capital: -0.418
+* Tolerance: +0.333
+* Healthcare: +0.301
+* Safety: +0.343
+
+Interpretacja PC2: Na górze znajdują się miasta z lepszą opieką zdrowotną, bezpieczeństwem i komunikacją, a na dole miasta z większym potencjałem startupowym i dostępem do kapitału.
+
+
+Europa i Ameryka Północna są do siebie stosunkowo zbliżone — miasta z tych regionów mają podobne profile cech. Ameryka północna jest trochę przesunięta wzdłóż osi PC2.
+
+Azja jest rozproszona — duże zróżnicowanie miast.
+
+Afryka i Ameryka Południowa raczej z jednej strony wykresu — sugeruje podobny typ profilu miast (np. niższe koszty życia, ale mniejszy rozwój edukacji, ekonomii służby zdrowia).
+
+Oceania — bardzo mała liczba punktów, ale zróżnicowana głównie wzdłóż PC2.
+
+\vspace{1cm}
+
+```{r wizualizacja-pca2, fig.width=13, fig.height=14, echo=FALSE, fig.cap="\\label{fig:pca_podpisy}Podpisane obserwacje w celu identyfikacji miast najmocniej odstających."}
+
+
+rownames(qol_standaryzowane) <- qol$UA_Name
+
+pca_wyniki <- prcomp(qol_standaryzowane, center = TRUE, scale. = TRUE)
+
+p3 <- fviz_pca_ind(pca_wyniki, 
+             title = "PCA z podpisami",       
+             col.ind = qol$UA_Continent,  # kolory wg kontynentu
+             label = "all",
+             repel = TRUE,
+             addEllipses = TRUE, 
+             legend.title = "Continent") 
+
+p3
+
+```
+
+
+Z wykresu \ref{fig:pca_podpisy} odczytujemy, że najbardziej odstaje Los Angeles, New York i San Francisco Bay Area. Prawdopodobnie dlatego, że są to świetne miasta dla biznesu, inwestycji i startupów, ale za to nie są bezpieczne. Z drugiej strony odstaje również Delhi, bo w tym mieście koszty życia są niskie i przez to jest bliżej miast afrykańskich, ale jest nim dobrze rozwinięte `Startups` i `Venture.capital`, przez co wyróżnia się na tle miast z prawej strony wykresu.
+
+
+
+
+
+## Korelacje zmiennych i biplot
+
+```{r korelacje-i-biplot,fig.width=5, fig.height=5, echo=FALSE, fig.cap="\\label{fig:macierz_biplot}Macierz korelacji i biplot dla wszystkich zmiennych ilościowych"}
+correlation.matrix <- cor(qol_standaryzowane)
+
+corrplot(correlation.matrix, method = "color", tl.cex = 0.8)
+
+fviz_pca_biplot(
+  pca_wyniki,
+  label = "var",
+  labelsize = 3,
+  col.var = "deepskyblue3",
+  arrows.color = "deepskyblue"
+)
+
+
+```
+\vspace{1cm}
+
+
+Występuje dodatnia korelacja między:
+
+* `Venture.capital` i `Startups`,
+* `Housing` i `Cost.of.Living`,
+* `Environmental.Quality` i `Business.Freedom`,
+* `Education` i `Business.Freedom`
+* `Tolerance` i `Environmental.Quality`.
+
+
+Występuje ujemna korelacja między:
+
+* `Business.Freedom` i `Cost.of.Living`,
+* `Education` i `Cost.of.Living`,
+* `Education` i `Housing`.
+
+## Wnioski końcowe
+
+Ciekawe obserwacje:
+
+- PC1 rozróżnia miasta pod względem **taniego życia i mieszkań (prawa strona)** vs. **jakości edukacji, środowiska, zdrowia (lewa strona)**.
+- PC2 oddziela **miasta startupowe i kulturalne (dół)** od **miast bezpiecznych i dobrze skomunikowanych (góra)**.
+
+- Miasta takie jak **Los Angeles, San Francisco, New York** odstają na dole wykresu, co wynika z ich wysokich wartości w *Startups*, *Venture Capital* i *Leisure & Culture*.
+- **Delhi i Mumbaj** odstają w prawy dół wykresu — czyli są stosunkowo tanie, ale mają cechy rozwijających się metropolii z dużą aktywnością gospodarczą.
+- **Zurich** jest silnie przesunięty w lewo — to bardzo drogie, ale wysokiej jakości miasto.
+- **Lagos** to miasto najbardziej wysunięte w prawo, czyli tanie koszty życia, ale bardzo niski poziom udogodnień.
+- Kontynenty są rozróżnialne — Europa i Ameryka Północna podobne, Azja rozproszona, Afryka i Ameryka Południowa zbliżone.
+
+Do zadowalającej wizualizacji danych wystarczają nam dwie (około 50% wariancji) lub trzy (około 60%) składowe, jednakże zdecydowałem się wybrać dwie ponieważ wykresy 2d są czytelniejsze.
+
+Zastosowanie standaryzacji miało istotny wpływ na wyniki analizy PCA. Zmiennych użytych w analizie nie można było bezpośrednio porównywać, ponieważ miały one różne rozrzuty. Brak standaryzacji skutkowałby tym, że zmienne o największej wariancji zdominowałyby pierwsze składowe główne, co zniekształciłoby strukturę danych.
+
+
+
+# Zadanie 3
+
+##  Przygotowanie danych
+
+Celem zadania jest przeprowadzenie skalowania wielowymiarowego (MDS) na zbiorze `titanic_train` w celu znalezinia potencjalnego klarownego podziału danych na skupiska i znalezienia cech, które będą wyróżniać owe grupy.
+
+```{r dane_titanic, results='asis'}
+library(titanic)
+data("titanic_train")
+Titanic <- titanic_train
+
+struktura_danych_titanic <- data.frame(
+  Zmienna = names(Titanic),
+  Opis = c("Identyfikator pasażera", "Czy pasażer przeżył katastrofę","Klasa biletu","Nazwisko pasażera",
+           "Płeć pasażera", "Wiek pasażera", "Czy na pokładzie było rodzeństwo lub współmałżonek (oraz liczba)", "Czy na pokładzie były dzieci lub rodzice pasażera (oraz liczba)", "Numer biletu", "Opłata pasażera", "Numer kabiny","Port zaokrętowania" ),
+  Typ = sapply(Titanic, function(x) paste(class(x), collapse = ", ")),
+  Przykładowe_wartości = sapply(Titanic, function(x) paste(head(x, 3), collapse = ", "))
+)
+
+kable(struktura_danych_titanic, 
+      caption = "Struktura zbioru danych titanic train",
+      align = 'l', 
+      row.names = FALSE,
+      format = "latex",
+      booktabs = TRUE) %>%
+  kable_styling(
+    latex_options = c("scale_down","HOLD_position"),
+    font_size = 7,
+    full_width = FALSE
+  ) %>%
+  column_spec(1, width = "2cm") %>%  
+  column_spec(2, width = "3cm") %>%  
+  column_spec(3, width = "2cm") %>%  
+  column_spec(4, width = "6cm")
+```
+
+Zbiór `titanic_train` zawiera **`r nrow(Titanic)`** obserwacji oraz **`r ncol(Titanic)`** cech. 
+
+```{r modyfikacja_danych_titanic, results='asis'}
+
+dane_brakujace <- data.frame(
+  zmienna = names(Titanic),
+  liczba_wartosci_brakujacych = as.integer(colSums(is.na(Titanic)))
+)
+
+tabela_xtable <- xtable(
+  dane_brakujace,
+  caption = "Wartości brakujące w zbiorze Titanic",
+  label = "tab:tabela_titanic_NA",
+  align = c("p{3cm}", "p{4cm}", "p{3cm}") # szer. kolumn
+)
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      scalebox = 0.8,
+      digits = c(0, 0, 0),
+      sanitize.colnames.function = function(x){
+        c("zmienna", "liczba NA")
+      },
+      comment = FALSE)
+```
+
+Na podstawie tabeli \ref{tab:tabela_titanic_NA} zawiera **`r colSums(is.na(Titanic))[6]`** wartości brakujących. W oryginalnym zbiorze typy zmienneych `Survived`, `Pclass`, `Sex` oraz `Embarked` zostały nieprawidłowo wczytane. Zamieniamy je na zmienne czynnikowe. Dodatkowo wartości brakujące w zmiennej `Age` uzupełniamy poprzez zastosowanie metody k-sąsiadów. Ponadto, cechy takie jak `PassengerId`, `Name`, `Ticket` otaz `Cabin` są identyfikatorami pasażerów, nie są potrzebne w dalszej analizie, dlatego możemy je pominąć.
+
+``` {r titanic_zamiana_typow, echo=TRUE}
+
+Titanic$Survived <- as.factor(Titanic$Survived)
+Titanic$Pclass <- as.ordered(Titanic$Pclass)
+Titanic$Pclass <- factor(Titanic$Pclass, 
+                          levels = c("3", "2", "1"),
+                          ordered = TRUE)
+Titanic$Sex <- as.factor(Titanic$Sex)
+Titanic$Embarked <- as.factor(Titanic$Embarked)
+
+Titanic_clean <- dplyr::select(Titanic, -PassengerId, -Name, -Ticket, -Cabin)
+# Uzupełniamy wartości brakujące metodą k-sąsiadów
+Titanic_clean <- kNN(Titanic_clean, k = 5, imp_var = FALSE)
+```
+
+## Wstępna analiza danych
+
+```{r macierz_korelcji_titanic, fig.width=4, fig.height=4, fig.cap="\\label{fig:korelacje_titanic} Macierz korelacji wybranych cech zbioru titanic train"}
+cor_dane <- Titanic_clean %>%
+  mutate(across(where(is.factor), as.numeric)) %>%  # Konwersja factor na numeric
+  mutate(Pclass = as.numeric(Pclass)) 
+
+cor_matrix <- cor(cor_dane)
+melted_cor_matrix <- melt(cor_matrix)
+
+ggplot(melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), name = "Korelacja") +
+  labs(title = "Macierz korelacji \n zmiennych zbioru Titanic",
+       x="",
+       y="") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1))
+
+```
+
+Wykres \ref{fig:korelacje_titanic} przedstawia macierz korelacji wybranych zmiennych zbioru `titanic_train`. Możemy zaobserwować następujące zależności:
+
+* Silna dodatnia korelacja zmiennych `Fare` i `Pclass` - im lepsza klasa, tym wyższa cena biletu.
+* Dodatnia korelacja między `Survived` i `Fare` oraz `Survived` i `Pclass` - osoby które zapłaciły więcej za bilet i miały lepszą klasę, miały większe szanse na przeżycie katastrofy.
+* Silna ujemna korelacja między `Survived` i `Sex` - silny związek między płcią, a szansą na przeżycie.
+* Dodatnia korelacja między `Age` a `Pclass` - osoby starsze miały bilety z lepszą klasą.
+
+## Redukcja wymiaru na bazie MDS
+
+Przeprowadzamy redukcję wymiarów metodą skalowania wielowymiarowego, poprzez wyznaczenie macierzy niepodobieństwa/odmienności i korzystamy z podstawowych parametrów funkcji `cmdscale()` sprowadzając dane do `2` oraz do `3` wymiarów.
+
+```{r redukcja_wymiaru}
+
+# Dane do analizy (bez zmiennej grupującej)
+mds_dane <- Titanic_clean[, !(names(Titanic_clean) == "Survived")]
+# Redukcja wymiaru na bazie MDS
+macierz_niepodob <- daisy(mds_dane, type = list(ordratio = "Pclass"), stand=T)  
+#traktujemy Pclass jako uporządkowaną
+macierz_niepodob <- as.matrix(macierz_niepodob)
+
+# METRYCZNE #
+# 2 WYMIARY #
+mds_Titanic_R2_metryczne <- cmdscale(macierz_niepodob, k=2)
+odl_mds_R2_metryczne <- dist(mds_Titanic_R2_metryczne, method="euclidean")
+odl_mds_R2_metryczne <- as.matrix(odl_mds_R2_metryczne)
+
+# kryterium STRESS
+odl_oryginalne <- macierz_niepodob
+STRESS <- sum((odl_oryginalne-odl_mds_R2_metryczne)^2)
+
+# 3 WYMIARY
+
+mds_Titanic_R3_metryczne <- cmdscale(macierz_niepodob, k=3)
+odl_mds_R3_metryczne <- dist(mds_Titanic_R3_metryczne, method="euclidean")
+odl_mds_R3_metryczne <- as.matrix(odl_mds_R3_metryczne)
+
+wyniki_mds_R3 <- data.frame(Dim1 = mds_Titanic_R3_metryczne[,1],
+                            Dim2 = mds_Titanic_R3_metryczne[,2],
+                            Dim3 = mds_Titanic_R3_metryczne[,3],
+                            Survived = Titanic_clean$Survived,
+                            Sex = Titanic_clean$Sex,
+                            Pclass = Titanic_clean$Pclass)
+STRESS_R3 <- sum((odl_oryginalne-odl_mds_R3_metryczne)^2)
+```
+
+
+```{r wykresy_sheparda, fig.width=6, fig.height=6, fig.cap="\\label{fig:diagramy_sheparda} Wykresy Sheparda zbioru titanic train dla wybranych wymiarów" }
+
+wykres_shepard <- function(mac_niepodobienstwa, wymiar = 3) {
+    
+    # Obliczenie MDS
+    mds_k <- cmdscale(mac_niepodobienstwa, k = wymiar)
+    odl_mds_k <- dist(mds_k, method = "euclidean")
+    odl_oryginalne <- mac_niepodobienstwa
+    odl_mds_k <- as.matrix(odl_mds_k)
+    
+    # Obliczenie funkcji STRESS
+    STRESS <- sum((odl_oryginalne - odl_mds_k)^2)
+    
+    # Ramka danych
+    shepard_dane <- data.frame(
+        oryginalne = as.vector(odl_oryginalne),
+        mds = as.vector(odl_mds_k)
+    )
+    
+    # Wykres z legendą
+    ggplot(shepard_dane, aes(x = oryginalne, y = mds)) +
+        geom_point(alpha = 0.5, size = 1, color = "grey40") +
+        
+        # Linia idealnego dopasowania (czerwona)
+        geom_abline(aes(color = "y=x",intercept = 0, slope = 1, color="red"), 
+                    linetype="dashed", size=0.7) +
+        
+        # Linia regresji (zielona)
+        geom_smooth(aes(color = "Dopasowanie \n liniowe", color = "green"), 
+                    method = "lm", se = FALSE, linetype = "dashed", size = 0.7) +
+        
+        # Kolory i style dla legendy
+        scale_color_manual(
+            name = "Legenda",
+            values = c(  "green", "red")
+        ) +
+        
+        labs(
+            title = paste("Diagram Sheparda (d =", wymiar, ")"),
+            x = "Odległości oryginalne",
+            y = "Odległości po MDS",
+            caption = paste("STRESS =", round(STRESS, 3))
+        ) +
+        
+        theme_minimal() +
+        theme(
+            plot.title = element_text(hjust = 0.5),
+            legend.position = "bottom",
+            plot.margin = unit(c(0, 0.2, 0, 0.2),"inches"),
+            axis.text=element_text(size=8),
+            axis.title=element_text(size=8),
+            legend.key.size = unit(0.3, 'cm'),
+            legend.text = element_text(size=6)
+        ) +
+        coord_fixed(ratio = 1)
+}
+
+shep2 <-  wykres_shepard(macierz_niepodob,wymiar = 2)
+shep3 <-  wykres_shepard(macierz_niepodob,wymiar = 3)
+
+shep2|shep3
+
+```
+
+Wykres \ref{fig:diagramy_sheparda} przedstawia rozrzut odległości po zastosowaniu MDS (sprowadzenie do 2 oraz 3 wymiarów) względem oryginalnych odległości. Czerwona linia przedstawia prostą $y=x$, natomiast zielona regresję liniową. Możemy zauważyć, że w przypadku 3 wymiarów, proste niemal się pokrywają, a punkty są bardziej skupione wokół prostej. Oznacza to że odległości po zastosowaniu MDS dla 3 wymiarów są zachowane znacznie lepiej, niż te uzyskane dla 2 wymiarów. Możemy zauważyć, że w przypadku sprowadzenia danych do 3 wymiarów, wartość kryterium `STRESS`, którą definiujemy jako:
+$$ S(z_1,z_2,...,z_n) = \sum_{i=1}^{n} \sum_{j=1}^{n} a_{ij}(d_{ij} - ||z_i - z_j||)^2, gdzie$$
+$a_{ij}$ - wagi (wartość zależna od algorytmu), $d_{ij}$ - elementy macierzy odmienności $D = [d_{ij}]_{i,j=1,...,n}$, $z_1,...,z_n \in \mathbb{R}^d$,
+jest znacznie niższa niż dla dwóch wymiarów. Potwierdza to wykres \ref{fig:STRESS_wykres} na którym widoczna jest zależność wartości funkcji `STRESS` od liczby wymiarów. Zauważyć można, że wartość tego kryterium jest najniższa (**`r round(STRESS_R3,2) `**) dla właśnie trzech wymiarów (na wykresie  punkt "łokciowy" znajduje się właśnie w tym miejscu). Oznacza to, że dla tej przestrzeni, odległości są najlepiej zachowane.
+
+```{r wykres_stress, fig.width= 5, fig.height=3, fig.cap="\\label{fig:STRESS_wykres} Wykres wartości zmiennej STRESS w zależności od liczby wymiarów"}
+
+# Wybieramy max wymiarów
+wymiar.max <- 8
+stress.wektor <- numeric(wymiar.max)
+
+# Obliczenia dla różnych wymiarów
+for (i in 1:wymiar.max) {
+  mds_k <- cmdscale(macierz_niepodob, k = i)
+  odl_mds_k <- dist(mds_k, method = "euclidean")
+  odl_org <- macierz_niepodob
+  odl_mds_k <- as.matrix(odl_mds_k)
+  STRESS <- sum((odl_org - odl_mds_k)^2)
+  stress.wektor[i] <- STRESS
+}
+
+dane_stress <- data.frame(
+  Wymiar = 1:wymiar.max,
+  Stress = stress.wektor
+)
+
+ggplot(dane_stress, aes(x = Wymiar, y = Stress)) +
+  geom_line(linewidth = 1, color = "steelblue1") +
+  geom_point(size = 3, color = "steelblue1") +
+  scale_x_continuous(breaks = 1:wymiar.max) +
+  labs(
+    title = "Funkcja STRESS w zależności od liczby wymiarów",
+    x = "Liczba wymiarów",
+    y = "Wartość STRESS"
+  ) +
+  theme_minimal() +
+  geom_hline(yintercept = min(stress.wektor), linetype = "dashed", color = "red",lwd=0.7) +
+  annotate("text", 
+           x = which.min(stress.wektor), 
+           y = min(stress.wektor) * 1.05,
+           label = paste("Min STRESS:", round(min(stress.wektor), 2)),
+           color = "red",
+           vjust = -1)
+
+```
+
+
+
+## Wizualizacja danych
+
+```{r mds_R2_survived, fig.cap="\\label{fig:wykres_survived_R2} Dwuwymiarowa reprezentacja MDS danych Titanic (grupowanie względem zmiennej Survived)",fig.height=4,fig.width=6}
+wyniki_mds_R2 <- data.frame(Dim1 = mds_Titanic_R2_metryczne[,1],
+                         Dim2 = mds_Titanic_R2_metryczne[,2],
+                         Survived = Titanic_clean$Survived,
+                         Sex = Titanic_clean$Sex,
+                         Pclass = Titanic_clean$Pclass,
+                         Age = Titanic_clean$Age)
+
+# Wykres
+ggplot(wyniki_mds_R2, aes(x = Dim1, y = Dim2, color = Survived)) +
+  geom_point(alpha = 0.6, size = 1) +
+  scale_color_manual(values = c("red", "blue"), 
+                     labels = c("Nie przeżył", "Przeżył")) +
+  labs(title = "Wyniki MDS dla danych Titanic",
+       x = "Wymiar 1", y = "Wymiar 2",
+       color = "Przeżył katastrofę") +
+  theme_minimal()+
+  theme(legend.position = "bottom")
+```
+
+Wykres \ref{fig:wykres_survived_R2} przedstawia rozmieszczenia danych `titanic_train` po sprowadzeniu danych, poprzez MDS, do dwóch wymiarów. Możemy zauważyć podział na dwie główne grupy. Natomiast każda z tych grup zawiera podział na 4 podgrupy. Dane są rozłożone w dość symetryczny sposób względem prostej $y=x$.
+W grupie "powyżej" tej prostej znaczna większość osób przeżyła katastrofę, natomiast w drugim klastrze większość zginęła. Na obrzeżach głównych klastrów zauważalne są pewne obserwacje odstające. W `III` ćwiartce układu współrzędnych, obserwacjami odstającymi są te osoby, które przeżyły, natomiast w `I` i `II`, wszystkie obserwacje odstające to osoby, które zginęły.
+
+```{r R2_plec_klasa, fig.width= 6, fig.height=6, fig.cap="\\label{fig:wykres_R2_plec_klasa} Dwuwymiarowa reprezentacja MDS danych Titanic (grupowanie względem zmiennej Sex i Pclass)" }
+
+wyniki_mds_R2$Sex_Pclass <- interaction(wyniki_mds_R2$Sex, wyniki_mds_R2$Pclass)
+
+# Kombinacja płeć i klasa
+colors <- c(
+  "female.1" = "pink",
+  "female.2" = "hotpink",  
+  "female.3" = "hotpink4", 
+  "male.1" = "steelblue4",    
+  "male.2" = "deepskyblue1",    
+  "male.3" = "blue"     
+)
+
+# Wizualizacja 
+ggplot(wyniki_mds_R2, aes(x = Dim1, y = Dim2, color = Sex_Pclass)) +
+  geom_point(alpha = 0.8, size = 2) +
+  scale_color_manual(
+    values = colors,
+    labels = c(
+      "female.1" = "Kobieta - 1 klasa", 
+      "female.2" = "Kobieta - 2 klasa",
+      "female.3" = "Kobieta - 3 klasa",
+      "male.1" = "Mężczyzna - 1 klasa",
+      "male.2" = "Mężczyzna - 2 klasa",
+      "male.3" = "Mężczyzna - 3 klasa"
+    ),
+    name = "Płeć i klasa"
+  ) +
+  labs(
+    title = "Wyniki MDS 2D dla danych Titanic",
+    subtitle = "Z podziałem na płeć, klasę",
+    x = "Wymiar 1", 
+    y = "Wymiar 2"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8)
+  ) +
+  guides(
+    color = guide_legend(order = 1),
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50")
+```
+
+Wykres \ref{fig:wykres_R2_plec_klasa} przedstawia podział pasażerów ze względu na płeć i klasę biletu. Możemy zauważyć, że główne klastry całkowicie separują płeć. Natomiast podgrupy są wyraźnie podzielone względem klasy. Dodatkowo, odnosząc się do wykresu \ref{fig:wykres_survived_R2}, odczytujemy, że osobami, które przeżyły katastrofę, były głównie kobiety. Również klasa biletu miała wpływ na przeżycie (osoby, które były w wyższej klasy, miały większą szansę przeżycia).
+
+```{r mds_R3_survived, fig.width=6, fig.height=6, fig.cap="\\label{fig:wykres_survived_R3} Trójwymiarowa reprezentacja MDS danych Titanic (grupowanie względem zmiennej Survived)"}
+
+kolory_survived = ifelse(wyniki_mds_R3$Survived == 1, "blue", "red")
+
+s3d <- scatterplot3d(
+  x = wyniki_mds_R3$Dim1,
+  y = wyniki_mds_R3$Dim2,
+  z = wyniki_mds_R3$Dim3,
+  color = kolory_survived,
+  pch = 19,
+  main = "MDS 3D Titanic z rzutowaniem na podstawę",
+  xlab = "Wymiar 1",
+  ylab = "Wymiar 2",
+  zlab = "Wymiar 3",
+  angle = 135,
+  grid = TRUE,
+  box = TRUE,
+  mar = c(3, 2, 2, 5)
+)
+
+# Dodajemy rzutowane punkty na dół wykresu
+s3d$points3d(
+  x = wyniki_mds_R3$Dim1,
+  y = wyniki_mds_R3$Dim2,
+  z = rep(-0.4, nrow(wyniki_mds_R3)),
+  col = ifelse(wyniki_mds_R3$Survived == 1, "deepskyblue", "hotpink"),
+  pch = 20,
+  cex = 0.5
+)
+
+#Linie łączące punkty z ich rzutami
+set.seed(111)  # Dla powtarzalności
+wybrane_rzuty <- sample(1:nrow(wyniki_mds_R3), 50)  # Wybieramy 50 rzutów
+
+for(i in wybrane_rzuty) {
+  s3d$points3d(
+    x = c(wyniki_mds_R3$Dim1[i], wyniki_mds_R3$Dim1[i]),
+    y = c(wyniki_mds_R3$Dim2[i], wyniki_mds_R3$Dim2[i]),
+    z = c(wyniki_mds_R3$Dim3[i], -0.4),
+    type = "l",
+    col = "gray75",
+    lty = 3,
+    lwd = 0.7
+  )
+}
+
+legend("topright",
+       inset = c(-0.2, 0), 
+       legend = c("Przeżył", "Nie przeżył", 
+                  "Rzut (Przeżył)", "Rzut (Nie przeżył)",
+                  "Linie rzutu"),
+       col = c("blue", "red", "deepskyblue", "hotpink", "gray75"),
+       pch = c(19, 19, 20, 20, NA),
+       lty = c(NA, NA, NA, NA, 3),
+       pt.cex = c(1, 1, 0.7, 0.7, NA),
+       xpd = TRUE, 
+       cex = 0.8)
+
+```
+
+Wykres \ref{fig:wykres_survived_R3} pokazuje rozmieszczenie obserwacji w trzech wymiarach. Interesującym spostrzeżeniem jest, że mężczyźni i kobiety z klasy pierwszej są umieszczeni na tej samej wysokości względem osi `Wymiaru 3`.
+
+ 
+```{r R2_przezyl_wiek, fig.width= 6, fig.height=6, fig.cap="\\label{fig:wykres_R2_wiek} Dwuwymiarowa reprezentacja MDS danych Titanic (grupowanie względem zmiennej Age i Survived)"}
+
+
+# Najpierw dodajemy kolumnę określającą czy pasażer był dzieckiem
+wyniki_mds_R2$czy_dziecko<- ifelse(wyniki_mds_R2$Age < 18, "Dziecko", "Dorosły")
+
+# Wizualizacja z podziałem na przeżycie i wiek
+ggplot(wyniki_mds_R2, aes(x = Dim1, y = Dim2, color = Survived, shape = czy_dziecko)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_color_manual(
+    values = c("0" = "red", "1" = "deepskyblue"),
+    labels = c("0" = "Nie przeżył", "1" = "Przeżył"),
+    name = "Przeżycie"
+  ) +
+  scale_shape_manual(
+    values = c("Dziecko" = 1, "Dorosły" = 4),  
+    name = "Grupa wiekowa"
+  ) +
+  labs(
+    title = "Wyniki MDS 2D dla danych Titanic",
+    x = "Wymiar 1", 
+    y = "Wymiar 2"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(face = "bold"),
+  ) +
+  guides(
+    color = guide_legend(order = 1, override.aes = list(size = 3)),
+    shape = guide_legend(order = 2, override.aes = list(size = 3))
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.4) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.4)
+```
+ 
+Na podstawie wykresu \ref{fig:wykres_R2_wiek} zauważamy, że obserwacje odstające, które są w `III` ćwiartce, to dorośli (mężczyźni i kobiety) z pierwszej klasy. Natomiast pozostałe, wcześniej wspomniane obserwacje odstające, to dzieci z klasy trzeciej. Dodatkowo każda z ośmiu podgrup ma dość wyraźne rozgraniczenie pomiędzy dorosłych a dzieci. W przypadku kobiet z klasy pierwszej i drugiej, grupa wiekowa nie miała wpływu na przeżycie, co może sugerować, że dzieci ewakułowały się wraz z matkami. Inna sytuacja ma miejsce w pozostałych skupiskach, nie można zbytnio stwierdzić czy wiek miał wpływ na przeżycie katastrofy. 
+
+## Podsumowanie
+
+* Zbiór danych `titanic_train` po zastosowaniu MDS został podzielony na dwie główne grupy (kobiety i mężczyźni). Równie dobrze zostały odseparowane obserwacje ze względu na klasę biletu.
+
+* W katastrofie zginęło zdecydowanie więcej mężczyzn niż kobiet. Wyjątkiem są nieliczni mężczyźni z klasy 1, którzy przeżyli (prawdopodobnie członkowie załogi lub wpływowe osoby).
+
+* Skalowanie wielowymiarowe najlepiej odwzorowuje oryginalne odległości dla 3 wymiarów.
+
+* Największy procent ofiar w katastrofie znajdowało się w 3 klasie.
+
+* Czynniki społeczne (płeć, klasa) były głównymi wyznacznikami przeżycia
+
+* Zmienne użyte w analizie (wiek, klasa, płeć, itp.) bardzo dobrze determinują przeżycie, jednak nie w pełni, co może wynikać z czynników losowych lub innych niewziętych pod uwagę zmiennych (np. miejsce na statku w momencie kolizji).
+
