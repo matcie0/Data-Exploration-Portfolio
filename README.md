@@ -48,19 +48,33 @@ Projekt skupia się na praktycznym zastosowaniu algorytmów klasyfikacji oraz za
 **[Pobierz pełne Sprawozdanie w PDF](./Supervised-Learning-Classification/Sprawozdanie3.pdf)**
 
 #### Zakres analizy:
-
 * **Rozszerzona Przestrzeń Cech - Zbiór Iris (Autor: [Dawid](https://github.com/DawidSkowronski)):**
   * Konstrukcja klasyfikatora opartego na regresji liniowej.
   * Konstrukcja modelu liniowego dla rozszerzonej przestrzeni cech.
-
 
 * **Modelowanie i Optymalizacja - Zbiór Vehicle (Autorzy: Mateusz Cieślak i [Dawid](https://github.com/DawidSkowronski)):**
   * Porównanie trzech metod: **k-NN**, **Naiwny Klasyfikator Bayesowski** oraz **Drzewa Klasyfikacyjne**.
   * Próba zwiększenia dokładności poprzez zastosowanie różnych parametrów i podzbiorów cech.
   
+## Sprawozdanie 4: Zaawansowane Metody Klasyfikacji (Ensemble Learning, SVM) i Analiza Skupień
+
+Ostatni etap cyklu projektowego, skupiający się na najskuteczniejszych algorytmach współczesnego Data Mining. Projekt łączy potęgę modeli zespołowych z precyzją maszyn wektorów nośnych oraz eksploracją struktur ukrytych przy pomocy klasteryzacji.
+
+**[Pobierz pełne Sprawozdanie w PDF](./Ensemble-Learning-SVM-Clustering/Sprawozdanie4.pdf)**
+
+#### Zakres analizy:
+
+* **Zadanie 1: Zaawansowana Klasyfikacja (Supervised Learning) (Autor: Mateusz Cieślak):**
+  * **Ensemble Learning:** Implementacja i porównanie metod zespołowych: **Bagging** oraz **Random Forest**. Analiza stabilności błędu OOB (Out-of-Bag) w zależności od liczby drzew oraz badanie ważności cech (Feature Importance).
+  * **Support Vector Machines (SVM):** Optymalizacja klasyfikatora SVM przy użyciu różnych funkcji jądrowych (liniowej, wielomianowej, radialnej). 
+  * **Tuning:** Wykorzystanie procedury *Grid Search* do znalezienia optymalnych parametrów.
+
+* **Zadanie 2: Analiza Skupień (Unsupervised Learning) (Autorzy: [Dawid](https://github.com/DawidSkowronski) i Mateusz Cieślak):**
+  * **Algorytmy Grupujące:** Praktyczne zastosowanie metod **K-means** oraz **PAM** (Partitioning Around Medoids).
+  * **Algorytmy Hierarchiczne:** Analiza aglomeracyjna **AGNES** z wykorzystaniem różnych strategii łączenia (Single, Complete, Average Linkage) oraz wizualizacja dendrogramów.
+  * **Walidacja i Optymalizacja:** Wybór optymalnej liczby klastrów (K=3) przy użyciu statystyki **Gap**, wskaźnika **Silhouette** oraz reguły łokcia. Ocena stabilności grupowania (miary APN, AD, ADM) i interpretacja cech wyróżniających poszczególne klastry.
 
 
-####  Narzędzia:
-`caret` (walidacja krzyżowa, bootstrap .632+), `rpart` (drzewa)
-`cmdscale` (MDS), `prcomp` (PCA), `plotly`
-`R`, `ggplot2`, `dplyr`, `RMarkdown`
+#### Narzędzia:
+`R`, `RMarkdown`, `randomForest`, `e1071` (SVM), `cluster` (PAM/AGNES), `clValid` (walidacja stabilności), `factoextra` (wizualizacja PCA i klastrów), `NbClust`,
+`caret` (walidacja krzyżowa, bootstrap .632+), `rpart` (drzewa), `cmdscale` (MDS), `prcomp` (PCA), `plotly`, `ggplot2`, `dplyr`
