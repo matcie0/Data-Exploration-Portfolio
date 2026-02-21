@@ -1,0 +1,2045 @@
+---
+title: "Sprawozdanie z listy nr 3"
+author: "Dawid Skowroński 282241, Mateusz Cieślak 272633"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    number_sections: true
+  word_document: default
+  html_document:
+    df_print: paged
+subtitle: Eksploracja Danych
+toc: true
+lof: true
+lot: true
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{float}
+- \usepackage{graphicx}
+- \usepackage[OT4]{polski}
+- \usepackage[utf8]{inputenc}
+- \usepackage{amsmath}
+- \renewcommand{\contentsname}{Spis treści}
+- \renewcommand{\listfigurename}{Spis wykresów}
+- \renewcommand{\listtablename}{Spis tabel}
+- \renewcommand{\figurename}{Wykres}
+- \renewcommand{\tablename}{Tabela}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  fig.width = 6,
+  fig.height = 3,
+  out.extra='',
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE)
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "", fig.align = "center")
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE)
+```
+
+```{r biblioteki}
+library(tinytex)
+library(knitr)
+library(patchwork)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(gridExtra)
+library(xtable)
+library(kableExtra)
+library(mlbench)
+library(purrr)
+library(ggpubr)
+library(class)
+library(reshape2)
+library(e1071)
+library(rpart)
+library(ggtext)
+library(rpart.plot)
+```
+
+# Zadanie 1
+
+## Wstępna analiza danych
+
+```{r iris_wczytanie_zbioru, results='asis'}
+data("iris")
+
+struktura_danych_iris <- data.frame(
+  Zmienna = names(iris),
+  Opis = c("Długość działki kielicha", "Szerokośc działki kielicha", "Długość płatka", "Szerokość płatka", "Gatunek irysa"),
+  Typ = sapply(iris, function(x) paste(class(x), collapse = ", ")),
+  Przykładowe.wartości = sapply(iris, function(x) paste(head(x, 4), collapse = ", "))
+)
+
+colnames(struktura_danych_iris) <-  c("Zmienna","Opis", "Typ", "Przykładowe wartości")
+
+xtable_iris <- xtable(
+  struktura_danych_iris,
+  caption = "Struktura zbioru danych iris",
+  label = "tab:irysy_opis",
+  align = c("l", "l", "l", "l", "l"),
+  
+)
+
+print(xtable_iris,
+      include.rownames = FALSE,
+       table.placement="H", 
+      caption.placement = "top",
+      comment = FALSE)
+```
+
+Zbiór danych `iris` zawiera pomiary o dla trzech gatunków irysów (`setosa`, `virginica`, `versicolor`).
+Opis poszczególnych zmiennych wraz z przykładkowymi wartościami przedstawiony jest w tabeli \ref{tab:irysy_opis}.
+
+
+Celem analizy jest:
+
+* zbudowanie modelu predykcyjnego na zbiorze uczącym,
+* porównanie prognozowanych etykietek klas z rzeczywistymi etykietkami, zarówno dla zbioru uczącego, jak i testowego,
+* stwierdzenie, czy wyznaczony model nadaje się do klasyfikacji zbioru `iris`.
+
+```{r iris_NA, results='asis'}
+dane_brakujace <- data.frame(
+  zmienna = names(iris),
+  "liczba wartości brakujących" = as.integer(colSums(is.na(iris)))  
+)
+
+tabela_xtable <- xtable(
+  dane_brakujace,
+  caption = "Wartości brakujące w zbiorze iris",
+  label = "tab:tabela1",
+  align = c("c", "c", "c")  
+)
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",      
+      size = "normalsize",
+      comment = FALSE,
+      digits = c(0, 0, 0),
+      sanitize.colnames.function = function(x){
+        c("zmienna", "liczba wartości brakujących")
+      })
+```
+
+```{r podzial_gatunkow, fig.cap = "\\label{fig:irysy_podzial_gat}Wykres słupkowy, przedstawiający liczbę obserwacji dla poszczególnego gatunku"}
+
+ggplot(iris, aes(x =Species, fill =Species)) +
+  geom_bar() +
+  labs(title = "Liczba obserwacji w każdej klasie",
+       x = "Gatunek irysa",
+       y = "Liczba obserwacji",
+       fill = "Gatunek") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Zbiór danych `iris` nie zawiera wartości brakujących (tabela \ref{tab:tabela1}). Dodatkowo, liczba obserwacji dla każdego gatunku jest równa, co przedstawia wykres \ref{fig:irysy_podzial_gat}.
+
+```{r etykiety_iris_1, fig.cap="\\label{fig:et_irysy_1}Etykietki klas dla zbioru iris"}
+etykiety_klas <- iris$Species
+#liczba klas
+K <- length(levels((etykiety_klas)))
+#Mamy 3 klasy
+
+ggplot(iris, aes(x = seq_along(Species), y = as.numeric(Species), color = Species)) +
+  geom_point(size = 1, alpha = 0.7) +
+  scale_y_continuous(breaks = 1:3, labels = levels(iris$Species)) +
+  labs(title = "Rozmieszczenie klas w zbiorze iris",
+       x = "Indeks",
+       y = "Etykietka klasy",
+       color = "Gatunek") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Rozkład gatunków w zbiorze `iris` (wykres \ref{fig:et_irysy_1}) jest uporządkowany.
+
+## Podział danych na zbiór testowy i uczący
+
+Dzielimy zbiór `iris` na `zbiór uczący` (**$\frac{2}{3}$** zbioru `iris`) i `zbiór testowy` (**$\frac{1}{3}$** zbioru `iris`).
+
+```{r irysy_podzial, results='asis'}
+
+set.seed(123)
+
+# Podział danych
+zbior.uczacy <- iris %>% slice_sample(prop = 2/3)
+zbior_testowy <- iris %>% setdiff(zbior.uczacy)
+
+dane_rozklad <- data.frame(
+  Gatunek = levels(iris$Species),
+  Uczacy = as.numeric(table(zbior.uczacy$Species)),
+  Testowy = as.numeric(table(zbior_testowy$Species))
+) %>%
+  rbind(data.frame(Gatunek = "Suma",
+                   Uczacy = sum(.$Uczacy),
+                   Testowy = sum(.$Testowy)))
+
+tabela_xtable <- xtable(
+  dane_rozklad,
+  caption = "Liczba obserwacji poszczególnych gatunków w zbiorze uczącym i testowym",
+  label = "tab:rozklad_danych",
+  align = c("c", "c", "c", "c")
+)
+
+print(tabela_xtable,
+      comment = FALSE,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement = "H",
+      sanitize.colnames.function = function(x) {
+        c("Gatunek", "Zbiór uczący", "Zbiór testowy")
+      },
+      hline.after = c(-1, 0, nrow(dane_rozklad)-1, nrow(dane_rozklad)))
+
+```
+
+Można zauważyć, że rozkład obserwacji w zależności od gatunku (tabela \ref{tab:rozklad_danych}) jest dość równo rozłożony w zbiorze uczącym. W zbiorze testowym natomiast, występuje najwięcej rekordów dla gatunku `versicolor`.
+
+```{r uczacy_nieposortowany, fig.cap="\\label{fig:uczacy_niesort} Rozkład obserwacji dla zbioru uczącego zbioru iris (w zależności od gatunku)"}
+etykiety_klas_uczacy_niesort <- zbior.uczacy$Species
+K_uczacy_niesort <- length(levels(etykiety_klas_uczacy_niesort))
+
+ggplot(zbior.uczacy, aes(x = seq_along(Species), y = as.numeric(Species), color = Species)) +
+  geom_point(size = 3, alpha = 0.7) +
+  scale_y_continuous(breaks = 1:K_uczacy_niesort, 
+                     labels = levels(etykiety_klas_uczacy_niesort)) +
+  labs(title = "Rozmieszczenie klas w zbiorze uczącym",
+       x = "Indeks obserwacji",
+       y = "Klasa",
+       color = "Gatunek") +
+  theme_minimal() +
+    theme(legend.position = "bottom")
+
+```
+
+Możemy zauważyć, że po podziale zbiory nie są uporządkowane (Wizualizacja dla zbioru uczącego na wykresie \ref{fig:uczacy_niesort}). Może to utrudnić interpretację kolejnych wykresów. Sortujemy zatem oba zbiory względem gatunku.
+
+```{r uczacy_posortowany}
+zbior_uczacy <-  zbior.uczacy[order(zbior.uczacy$Species),]
+zbior_testowy <- zbior_testowy[order(zbior_testowy$Species),]
+```
+
+```{r uczacy_przypisanie_etykiet}
+# Zbiór etykietek klas
+etykiety_klas_uczacy <- zbior_uczacy$Species
+# Liczba klas w zbiorze uczącym
+K_uczacy <- length(levels(etykiety_klas_uczacy))
+```
+
+## Konstrukcja klasyfikatora i wyznaczenie prognoz
+
+Prognozujemy zmienną jakościową, etykietkę klasy (do każdego ustalonego obiektu chcemy przypisać mu przynależność do danej klasy).
+
+Przyjmujemy model liniowy regresji w postaci:
+$$ Y = \beta_0 + \beta_1 X_1 + \beta_2 X_2 + \beta_3 X_3 + ... + \beta_n X_n +  \epsilon, $$
+gdzie $Y$ - zmienna zależna (objaśniana), $X_i, i = 1,...,n$ - zmienne niezależne (objaśniające),
+$\epsilon$ - błędy losowe o jednakowej wariancji $\sigma^2$, $\beta_j, j = 0,...,n$ - pewne współczynniki.
+
+Prognozę zmiennej Y wyznaczamy ze wzoru:
+$$\hat{Y} = \hat{\beta}_0 + \hat{\beta}_1 X_1 + \hat{\beta}_2 X_2 + \hat{\beta}_3 X_3 + ... + \hat{\beta}_n X_n,$$
+gdzie $\hat{\beta}_j, j = 0,...,n$ - estymatory nieznanych współczynników.
+
+Tworzymy model w nastepujący sposób:
+
+* Dodajemy kolumnę wolnych wyrazów do macierzy modelu zbioru uczącego (macierz $\mathbb{X}$).
+
+* Tworzymy macierz wskaźnikową $\mathbb{Y}_{n \times g}$, o liczbie wierszy równej liczbie obserwacji (wartość **n**) oraz liczbie kolumn równej liczbie klas (wartość **g**), zawierającą przynależność do poszczególnych klas zakodowane za pomocą zmiennych binarnych.
+
+* Metodą najmniejszych kwadratów wyznaczamy estymatory współczynników  $\hat{\beta}_j$, korzystając ze wzoru $\mathbb{\hat{B}}_{(k+1) \times g} = (\mathbb{X}^T\mathbb{X})^{-1}\mathbb{X}^T\mathbb{Y}$, gdzie $\mathbb{X}$ jest macierzą modelu:
+
+$$\mathbb{X}_{n \times (k+1)}  = \begin{bmatrix}
+1 & x_{11} & x_{12} & \dots & x_{1k} \\
+\vdots & \vdots & \vdots & \ddots & \vdots \\
+1 & x_{n1} & x_{n2} & \dots & x_{nk} \\
+\end{bmatrix}.$$
+
+
+* Wyznaczamy prawdopodobieństwo **a posteriori** (prognozowane prawdopodobieństwo przynależności do klasy) za pomocą wzoru $\mathbb{\hat{Y}} = \mathbb{X} \mathbb{\hat{B}}$
+
+* Do każdej obserwacji przypisujemy tę klasę, dla której mamy największe prawdopodobieństwo.
+
+\vspace{1cm}
+
+```{r model_zb_uczacy_1}
+# Pierwsza kolumna - przypisujemy wolny wyraz (uwzględniony w modelu regresji)
+X_uczacy <- cbind(rep(1,dim(zbior_uczacy)[1]), zbior_uczacy[,1:4])
+X_uczacy <- as.matrix(X_uczacy)
+
+## Wyznaczamy macierz wskaźnikową Y
+# Kodujemy poszczególne gatunki za pomocą zmiennych binarnych
+Y_uczacy <- matrix(0,nrow = dim(zbior_uczacy)[1],ncol = K_uczacy)
+etykiety_uczacy_numer <- as.numeric((etykiety_klas_uczacy))
+
+for (k in 1:K_uczacy) {
+  Y_uczacy[etykiety_uczacy_numer==k,k] <- 1
+}
+
+```
+
+
+```{r model_zb_uczacy_2}
+#Metoda najmniejszych kwadratów
+B_wsp_uczacy <- solve(t(X_uczacy)%*%X_uczacy) %*% t(X_uczacy) %*% Y_uczacy
+
+#Wyznaczamy wartości prognozowane (prawdopodobieństwo a posteriori)
+Y_prawd_uczacy <- X_uczacy%*%B_wsp_uczacy
+```
+
+```{r uczacy_kilka_obs, echo=TRUE}
+head(Y_prawd_uczacy)
+```
+
+Możemy zauważyć, że niektóre wartości prawdopodobieństwa wykraczają poza przedział $[0,1]$.
+
+
+Kontrolne sprawdzenie czy prawdopodobieństwa sumują się do 1:
+```{r zb_uczacy_czy_sumuja_do_1, echo = TRUE}
+rowSums(Y_prawd_uczacy) 
+```
+
+Prawdopodobieństwa dla każdej obserwacji sumują się do 1.
+
+## Ocena dokładności modelu
+
+
+```{r uczacy_prawdopodobienstwa, fig.cap="\\label{fig:uczacy_prawd_wyk}Prawdopodobieństwa przynależności do poszczególnych gatunków w zbiorze uczącym wyznaczone za pomocą modelu liniowej regresji"}
+
+# Konwersja danych na długi format
+y_prawd_df <- as.data.frame(Y_prawd_uczacy)
+colnames(y_prawd_df) <- levels(zbior_uczacy$Species) # Tylko nazwy gatunków
+y_prawd_df$indeks <- 1:nrow(y_prawd_df)
+y_prawd_long <- melt(y_prawd_df, id.vars = "indeks")
+
+# Wykres prognoz
+ggplot(y_prawd_long, aes(x = indeks, y = value, color = variable)) +
+  geom_point(alpha = 0.6) +
+  
+  geom_vline(xintercept = c(nrow(zbior_uczacy[which(zbior_uczacy$Species == "setosa"),])
+,nrow(zbior_uczacy[which(zbior_uczacy$Species == "setosa"),]) + 
+  nrow(zbior_uczacy[which(zbior_uczacy$Species == "versicolor"),]) ), 
+  linetype = "dashed", color = "gray50") +
+  
+  scale_y_continuous(limits = c(-0.5, 2)) +
+  labs(
+    title = "Prognozowane prawdopodobieństwa \n przynależności do klas",
+    x = "Indeks obserwacji",
+    y = "Wartość prognozy",
+    color = "Gatunek"
+  ) +
+  scale_color_manual(
+    values = c("setosa" = "red", "versicolor" = "green", "virginica" = "blue"),
+    labels = levels(zbior_uczacy$Species)
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom" )
+```
+
+Wykres \ref{fig:uczacy_prawd_wyk} przedstawia rozkład prawdopodobieństw obserwacji dla poszczególnych klas w zbiorze uczącym. Możemy zauważyć, że w pierwszej klasie (patrząc od lewej strony wykresu) największą wartość przyjmują obiekty o etykiecie klasy `setosa`, dodatkowo są bardzo dobrze odseparowane od pozostałych obserwacji. Trochę gorsza separacja widoczna jest w trzeciej klasie. W znacznej większości dominują obserwacje z etykietką klasy `virginica`, aczkolwiek niektóre obiekty o etykiecie `versicolor` przyjmują równie wysokie prawdopodobieństwo. W drugim przedziale nie można wyróżnić żadnej z etykiet. Druga klasa (`versicolor`) jest przysłaniana przez klasę 3 (`virginica`). Wiele punktów ma prawdopodobieństwa bliskie 0.5 dla obu klas. Występuje zatem problem częściowego maskowania klas, co znacznie wpływa na dokładność klasyfikacji.
+
+```{r dokladnosc_uczacy, fig.cap="\\label{fig:mac_wyk_uczacy}Wykres liczby rzeczywistych etykietek klas względem prognozowanych w zbiorze uczącym"}
+klasy_uczacy <- levels(zbior_uczacy$Species)
+maks_ind_uczacy <- apply(Y_prawd_uczacy,1,FUN = function(x) which.max(x))
+
+prognozowane_etykiety_uczacy <- klasy_uczacy[maks_ind_uczacy]
+
+rzecz_etykiety_uczacy <- etykiety_klas_uczacy
+
+macierz_pomylek_uczacy <- table(rzecz_etykiety_uczacy, prognozowane_etykiety_uczacy)
+
+# Dane do wykresu przynależności
+df_macierz_uczacy <- as.data.frame(macierz_pomylek_uczacy)
+names(df_macierz_uczacy) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y (Predykcja)
+df_macierz_uczacy$Predykcja <- factor(df_macierz_uczacy$Predykcja, levels = rev(levels(df_macierz_uczacy$Predykcja)))
+
+# Wykres
+ggplot(df_macierz_uczacy, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze uczacym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+
+
+
+dokl_klasyfikacji_uczacy <- sum(diag(macierz_pomylek_uczacy))/dim(zbior_uczacy)[1]
+
+```
+
+Wykres \ref{fig:mac_wyk_uczacy} ukazuje, że najwięcej niepoprawnych dopasowań etykietek wystąpiło dla gatunku `versicolor` (błędne przypisanie do klasy `virginica`), co zgadza się z obserwacjami z wykresu \ref{fig:uczacy_prawd_wyk}. Dla gatunku `setosa` wszystkie etykietki zostały poprawnie dopasowane. Dokładność klasyfikacji dla zbioru uczącego jest na poziomie **`r round(dokl_klasyfikacji_uczacy*100,2)`** %.
+
+```{r prawdopodobienstwa_testowy}
+
+# Macierz pomyłek dla zbioru testowego
+X_test <- cbind(1, as.matrix(zbior_testowy[, 1:4]))
+X_test <- as.matrix(X_test)
+
+# Obliczamy prognozowane prawdopodobieństwa dla zbioru testowego
+Y_prawd_test <- X_test %*% B_wsp_uczacy  # używamy współczynników ze zbioru uczącego
+
+```
+
+```{r prognozy_wykres_testowy, fig.cap="\\label{fig:prawd_wyk_test}Prawdopodobieństwa przynależności do poszczególnych gatunków w zbiorze testowym wyznaczone za pomocą modelu liniowej regresji"}
+
+# Konwersja danych na długi format
+y_prawd_df_test <- as.data.frame(Y_prawd_test)
+colnames(y_prawd_df_test) <- levels(zbior_testowy$Species) # nazwy gatunków
+y_prawd_df_test$indeks <- 1:nrow(y_prawd_df_test)
+y_prawd_long_test <- melt(y_prawd_df_test, id.vars = "indeks")
+
+# Wykres prognoz
+ggplot(y_prawd_long_test, aes(x = indeks, y = value, color = variable)) +
+  geom_point(alpha = 0.6) +
+  
+  geom_vline(xintercept = c(nrow(zbior_testowy[which(zbior_testowy$Species == "setosa"),])
+,nrow(zbior_testowy[which(zbior_testowy$Species == "setosa"),]) + 
+  nrow(zbior_testowy[which(zbior_testowy$Species == "versicolor"),]) ), 
+  linetype = "dashed", color = "gray50") +
+  
+  scale_y_continuous(limits = c(-0.5, 2)) +
+  labs(
+    title = "Prognozowane prawdopodobieństwa \n przynależności do klas",
+    x = "Indeks obserwacji",
+    y = "Wartość prognozy",
+    color = "Gatunek"
+  ) +
+  scale_color_manual(
+    values = c("setosa" = "red", "versicolor" = "green", "virginica" = "blue"),
+    labels = levels(zbior_uczacy$Species)
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom" )
+```
+
+Wykres \ref{fig:prawd_wyk_test} przedstawia rozkład prognozowanych prawdopodobieństw dla zbioru testowego. Możemy z niego wyciągnąć podobne wnioski jak dla wykresu \ref{fig:uczacy_prawd_wyk}. Ponownie możemy zauważyć bardzo dobre odseparowanie dla gatunku setosa. Również dość dobrze wyróżnia się klasa `virginica` (pierwszy przedział od prawej), jedynie pojedyncze obserwacje o etykiecie `versicolor` przyjmują wyższe wartości od tych o etykiecie `virginica`. Znowu widoczny jest brak wyraźnej dominacji jednej etykiety w środkowej części wykresu (problem częściowego maskowania klas). Może to wynikać z tego, że niektóre cechy mają podobny rozkład dla tych właśnie gatunków i częściowo na siebie nachodzą.
+
+``` {r dokladnosc_macierz_testowy, fig.cap = "\\label{fig:mac_wyk_test}Wykres liczby rzeczywistych etykietek klas względem prognozowanych w zbiorze testowym" }
+### OCENA DOKŁADNOŚCI KLASYFIKACJI NA ZBIORZE TESTOWYM ####
+klasy_testowy <- levels(zbior_testowy$Species)
+maks_ind_testowy <- apply(Y_prawd_test, 1, FUN = function(x) which.max(x))
+prognozowane_etykiety_testowy <- klasy_testowy[maks_ind_testowy]
+
+rzecz_etykiety_testowy <- zbior_testowy$Species
+macierz_pomylek_testowy <- table(rzecz_etykiety_testowy, prognozowane_etykiety_testowy)
+
+# Dane do wykresu przynależności
+df_macierz_testowy <- as.data.frame(macierz_pomylek_testowy)
+names(df_macierz_testowy) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y (Predykcja)
+df_macierz_testowy$Predykcja <- factor(df_macierz_testowy$Predykcja, levels = rev(levels(df_macierz_testowy$Predykcja)))
+
+# Wykres
+ggplot(df_macierz_testowy, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze testowym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+
+dokl_klasyfikacji_testowy <- sum(diag(macierz_pomylek_testowy)) / dim(zbior_testowy)[1]
+# dokładność klasyfikacji jest nieznacznie lepsza niż dla zbioru uczącego
+```
+
+Wykres \ref{fig:mac_wyk_test} ponownie pokazuje, że najwięcej niepoprawnych dopasowań etykietek wystąpiło dla gatunku `versicolor`. Zgadza się z obserwacjami z wykresu \ref{fig:prawd_wyk_test}. Dla gatunku `setosa` wszystkie etykietki zostały poprawnie dopasowane. Dokładność klasyfikacji dla zbioru uczącego jest na poziomie **`r round(dokl_klasyfikacji_testowy*100,4)`** %.
+
+
+## Konstrukcja modelu liniowego dla rozszerzonej przestrzeni cech
+
+Ponownie tworzymy model regresji liniowej dla zbioru `iris` tym razem rozszerzonego o składniki wielomianowe i iloczyny zmiennych stopnia `K-1`, gdzie `K` to liczba klas, w celu teoretycznej poprawy dokładności klasyfikacji i wyeliminowania lub zmniejszenia zjawiska maskowania klas. W tym przypadku uwzględniamy wielomiany stopnia 2.
+Ponawiamy też wybór podzbiorów (zbiór uczący i testowych w takich samych proporcjach jak poprzednio).
+
+```{r iris_rozszerzone_o_nowe_zmienne, echo = TRUE }
+
+iris_rozszerz <- iris
+# Zmieniamy nazwy na krótsze
+names(iris_rozszerz) <- c("SL","SW","PL","PW","S")
+iris_rozszerz <- transform(iris_rozszerz, SL_SW=SL*SW,  PL_PW=PL*PW, PL_SL=PL*SL,
+                              PL_SW=PL*SW, PW_SW=PW*SW, PW_SL=PW*SL, PL_2=PL*PL,
+                              PW_2=PW*PW, SL_2=SL*SL, SW_2=SW*SW)
+```
+
+```{r iris_roszczerzone_podzbiory}
+#Ponawiamy schemat
+set.seed(123)
+
+uczacy_rozsz <- iris_rozszerz %>% slice_sample(prop = 2/3)
+
+# wybieramy pozostałe rekordy
+testowy_rozsz <- iris_rozszerz %>% setdiff(uczacy_rozsz)
+
+# Porządkujemy względem gatunku dla czytelności wykresów
+uczacy_rozsz <-  uczacy_rozsz[order(uczacy_rozsz$S),]
+testowy_rozsz <- testowy_rozsz[order(testowy_rozsz$S),]
+
+```
+
+Konstrukcja modelu przebiega analogicznie. Jedną z różnic jest rozmiar macierzy $\mathbb{X}$ (zawiera teraz `r dim( cbind(rep(1,dim(uczacy_rozsz)[1]), uczacy_rozsz[,-c(5)]) )[2]` kolumn (czyli wszystkie kombinacje zmiennych zbioru iris, które tworzą wielomiany stopnia co najwyżej 2) zamiast `r dim(X_uczacy)[2]`).
+
+```{r budowa_modelu_uczacy_rozszerzony}
+
+etykiety_klas_rozsz <- iris_rozszerz$S
+#liczba klas
+K_rozsz <- length(levels((etykiety_klas_rozsz)))
+
+etykiety_klas_uczacy_rozsz <- uczacy_rozsz$S
+
+# Wyznaczanie modelu
+X_uczacy_rozsz <- cbind(rep(1,dim(uczacy_rozsz)[1]), uczacy_rozsz[,-c(5)]) 
+# pierwsza kolumna - przypisujemy wolny wyraz (uwzględniony w modelu regresji)
+# pomijamy też kolumnę z gatunkami
+X_uczacy_rozsz <- as.matrix(X_uczacy_rozsz)
+
+## Wyznaczamy macierz wskaźnikową Y
+# Kodujemy poszczególne gatunki za pomocą zmiennych binarnych
+Y_uczacy_rozsz <- matrix(0,nrow = dim(uczacy_rozsz)[1],ncol = K_rozsz)
+etykiety_uczacy_numer_rozsz <- as.numeric((etykiety_klas_uczacy_rozsz))
+
+for (k in 1:K_rozsz) {
+  Y_uczacy_rozsz[etykiety_uczacy_numer_rozsz==k,k] <- 1
+}
+
+#Metoda najmniejszych kwadratów
+B_wsp_uczacy_rozsz <- solve(t(X_uczacy_rozsz)%*%X_uczacy_rozsz) %*% t(X_uczacy_rozsz) %*% Y_uczacy_rozsz
+
+#Wyznaczamy wartości prognozowane (prawdopodobieństwo a posteriori)
+Y_prawd_uczacy_rozsz <- X_uczacy_rozsz%*%B_wsp_uczacy_rozsz
+
+#Kontrolne sprawdzenie czy prawdopodobieństwa sumują się do 1
+#rowSums(Y_prawd_uczacy_rozsz) # OK
+
+```
+
+### Ocena jakości modelu
+
+``` {r dokladnosc_rozszerzony_model, fig.cap = "\\label{fig:wyk_prawd_ucz_rozsz}Prawdopodobieństwa przynależności do poszczególnych gatunków w zbiorze uczącym wyznaczone za pomocą modelu liniowej regresji dla rozszerzonej przestrzeni cech"}
+### OCENA DOKŁADNOŚCI KLASYFIKACJI NA ZBIORZE UCZĄCYM
+# Konwersja danych na długi format
+y_prawd_df_rozsz_uczacy <- as.data.frame(Y_prawd_uczacy_rozsz)
+colnames(y_prawd_df_rozsz_uczacy) <- levels(uczacy_rozsz$S) # nazwy gatunków
+y_prawd_df_rozsz_uczacy$indeks <- 1:nrow(y_prawd_df_rozsz_uczacy)
+y_prawd_long_rozsz_uczacy <- melt(y_prawd_df_rozsz_uczacy, id.vars = "indeks")
+
+# Wykres prognoz
+ggplot(y_prawd_long_rozsz_uczacy, aes(x = indeks, y = value, color = variable)) +
+  geom_point(alpha = 0.6) +
+  
+  geom_vline(xintercept = c(nrow(uczacy_rozsz[which(uczacy_rozsz$S == "setosa"),])
+,nrow(uczacy_rozsz[which(uczacy_rozsz$S == "setosa"),]) + 
+  nrow(uczacy_rozsz[which(uczacy_rozsz$S == "versicolor"),]) ), 
+  linetype = "dashed", color = "gray50") +
+  
+  scale_y_continuous(limits = c(-0.5, 2)) +
+  labs(
+    title = "Prognozowane prawdopodobieństwa \n przynależności do klas",
+    x = "Indeks obserwacji",
+    y = "Wartość prognozy",
+    color = "Gatunek"
+  ) +
+  scale_color_manual(
+    values = c("setosa" = "red", "versicolor" = "green", "virginica" = "blue"),
+    labels = levels(uczacy_rozsz$S)
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom" )
+```
+
+Po wyznaczeniu prognozowanych wartości prawdopodobieństw dla rozszerzonej przestrzeni cech, możemy zauważyć znaczną poprawę w dyskryminacji obserwacji (wykres \ref{fig:wyk_prawd_ucz_rozsz}). Obiekty o etykiecie `setosa` i `versicolor` są idealnie odseparowane od pozostałych obserwacji (pierwszy i drugi przedział od lewej). Natomiast dla etykietki `virginica` jedynie kilka obiektów ma prognozowaną wartość prawdopodobieństwa mniejszą niż te o etykietce `versicolor`. Możemy stąd wywnioskować, że maskowanie klas już nie występuje.
+
+```{r macierz_wykres_rozsz_uczacy, fig.cap="\\label{fig:mac_ucz_rozsz}Wykres liczby rzeczywistych etykietek klas względem prognozowanych w zbiorze uczącym w przestrzeni rozszerzonej" }
+klasy_uczacy_rozsz <- levels(uczacy_rozsz$S)
+maks_ind_uczacy_rozsz <- apply(Y_prawd_uczacy_rozsz,1,FUN = function(x) which.max(x))
+
+prognozowane_etykiety_uczacy_rozsz <- klasy_uczacy_rozsz[maks_ind_uczacy_rozsz]
+
+rzecz_etykiety_uczacy_rozsz <- etykiety_klas_uczacy_rozsz
+
+macierz_pomylek_uczacy_rozsz <- table(rzecz_etykiety_uczacy_rozsz, prognozowane_etykiety_uczacy_rozsz)  
+
+# Dane do wykresu przynależności
+df_macierz_rozsz_uczacy <- as.data.frame(macierz_pomylek_uczacy_rozsz)
+names(df_macierz_rozsz_uczacy) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y (Predykcja)
+df_macierz_rozsz_uczacy$Predykcja <- factor(df_macierz_rozsz_uczacy$Predykcja, levels = rev(levels(df_macierz_rozsz_uczacy$Predykcja)))
+
+# Wykres
+ggplot(df_macierz_rozsz_uczacy, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze uczacym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+
+dokl_klasyfikacji_uczacy_rozsz <- sum(diag(macierz_pomylek_uczacy_rozsz))/dim(uczacy_rozsz)[1]
+
+```
+
+Wykres \ref{fig:mac_ucz_rozsz} potwierdza dobre przyporządkowanie klas, widoczna jest znacząca poprawa względem zbioru uczącego dla podstawowego zbioru `iris` (wykres \ref{fig:mac_wyk_uczacy}). Dokładność klasyfikacji jest na poziomie **`r round(dokl_klasyfikacji_uczacy_rozsz*100,2)`** %. Znaczna poprawa dokładności klasyfikacji sugeruje, że problem maskowania klas został wyeliminowany.
+
+```{r prognoza_rozszerzony_testowy, fig.cap = "\\label{fig:wyk_prawd_test_rozsz}Prawdopodobieństwa przynależności do poszczególnych gatunków w zbiorze testowym wyznaczone za pomocą modelu liniowej regresji dla rozszerzonej przestrzeni cech"}
+X_test_rozsz <- cbind(1, as.matrix(testowy_rozsz[, -c(5)]))
+X_test_rozsz <- as.matrix(X_test_rozsz)
+
+# Obliczamy prognozowane prawdopodobieństwa dla zbioru testowego
+Y_prawd_test_rozsz <- X_test_rozsz %*% B_wsp_uczacy_rozsz  # używamy współczynników ze zbioru uczącego
+
+### OCENA DOKŁADNOŚCI KLASYFIKACJI NA ZBIORZE TESTOWYM
+# Konwersja danych na długi format
+y_prawd_df_rozsz_testowy <- as.data.frame(Y_prawd_test_rozsz)
+colnames(y_prawd_df_rozsz_testowy) <- levels(testowy_rozsz$S) # nazwy gatunków
+y_prawd_df_rozsz_testowy$indeks <- 1:nrow(y_prawd_df_rozsz_testowy)
+y_prawd_long_rozsz_testowy <- melt(y_prawd_df_rozsz_testowy, id.vars = "indeks")
+
+# Wykres prognoz
+ggplot(y_prawd_long_rozsz_testowy, aes(x = indeks, y = value, color = variable)) +
+  geom_point(alpha = 0.6) +
+  
+  geom_vline(xintercept = c(nrow(testowy_rozsz[which(testowy_rozsz$S == "setosa"),])
+  ,nrow(testowy_rozsz[which(testowy_rozsz$S == "setosa"),]) + 
+  nrow(testowy_rozsz[which(testowy_rozsz$S == "versicolor"),]) ), 
+  linetype = "dashed", color = "gray50") +
+  
+  scale_y_continuous(limits = c(-0.5, 2)) +
+  labs(
+    title = "Prognozowane prawdopodobieństwa \n przynależności do klas",
+    x = "Indeks obserwacji",
+    y = "Wartość prognozy",
+    color = "Gatunek"
+  ) +
+  scale_color_manual(
+    values = c("setosa" = "red", "versicolor" = "green", "virginica" = "blue"),
+    labels = levels(testowy_rozsz$S)
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom" )
+```
+
+Dla zbioru testowego w rozszerzonej przestrzeni cech (rozkład prawdopodobieństw wykres \ref{fig:wyk_prawd_test_rozsz}), wyniki są zbliżone do tych z wykresu \ref{fig:wyk_prawd_ucz_rozsz}. Również widoczna jest bardzo dobra separacja etykietek dla każdego gatunku.
+
+``` {r wykres_macierz_rozsz_testowy, fig.cap = "\\label{fig:mac_test_rozsz}Wykres liczby rzeczywistych etykietek klas względem prognozowanych w zbiorze testowym w przestrzeni rozszerzonej"}
+klasy_testowy_rozsz <- levels(testowy_rozsz$S)
+maks_ind_testowy_rozsz <- apply(Y_prawd_test_rozsz, 1, FUN = function(x) which.max(x))
+prognozowane_etykiety_testowy_rozsz <- klasy_testowy_rozsz[maks_ind_testowy_rozsz]
+
+rzecz_etykiety_testowy_rozsz <- testowy_rozsz$S
+macierz_pomylek_testowy_rozsz <- table(rzecz_etykiety_testowy_rozsz, prognozowane_etykiety_testowy_rozsz)
+
+
+# Dane do wykresu przynależności
+df_macierz_rozsz_testowy <- as.data.frame(macierz_pomylek_testowy_rozsz)
+names(df_macierz_rozsz_testowy) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y (Predykcja)
+df_macierz_rozsz_testowy$Predykcja <- factor(df_macierz_rozsz_testowy$Predykcja, levels = rev(levels(df_macierz_rozsz_testowy$Predykcja)))
+
+# Wykres
+ggplot(df_macierz_rozsz_testowy, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze testowym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+
+
+dokl_klasyfikacji_testowy_rozsz <- sum(diag(macierz_pomylek_testowy_rozsz)) / dim(testowy_rozsz)[1]
+
+```
+
+Wykres \ref{fig:mac_test_rozsz} pokazuje bardzo dobrą klasyfikację. Jedynie jedna obserwacja z klasy `virginica` została źle dopasowana. Dokładność klasyfikacji jest na poziomie **`r round(dokl_klasyfikacji_testowy_rozsz*100,2)`** %.
+
+### Przykład przeuczenia 
+
+Aby pokazać zjawisko przeuczenia modelu regresji liniowej na zbiorze `iris`, wyznaczmy dwa podzbiory zbiór uczący, lecz tym razem modyfikujemy proporcje podziału. Zbadamy dokładność klasyfikacji na zbiorze uczącym i testowym, zarówno dla domyślnego zbioru `iris`, jak i tego o rozszerzonej przestrzeni cech.
+
+```{r funkcja_liczaca_dokladnosc_regresja_liniowa, results='asis'}
+policz_dokladnosc_klasyf <- function(dane,gatunek ,proporcja_ucz_test){
+  
+  set.seed(123)
+  
+  uczacy <- dane %>% slice_sample(prop = proporcja_ucz_test)
+
+  # wybieramy pozostałe rekordy
+  testowy <- dane %>% setdiff(uczacy)
+
+  uczacy <-  uczacy[order(uczacy[[gatunek]]),]
+  testowy <- testowy[order(testowy[[gatunek]]),]
+  
+  etykiety_klas <- dane[[gatunek]]
+  K <- length(levels((etykiety_klas)))
+
+  etykiety_klas_uczacy<- uczacy[[gatunek]]
+  
+  # Wyznaczanie modelu
+  X_uczacy <- cbind(rep(1,dim(uczacy)[1]), uczacy[,-which(colnames(uczacy) == gatunek)]) 
+  X_uczacy <- as.matrix(X_uczacy)
+  
+  Y_uczacy<- matrix(0,nrow = dim(uczacy)[1],ncol = K)
+  etykiety_uczacy_numer <- as.numeric((etykiety_klas_uczacy))
+  
+  for (k in 1:K) {
+    Y_uczacy[etykiety_uczacy_numer==k,k] <- 1
+  }
+  
+  #Metoda najmniejszych kwadratów
+  B_wsp_uczacy<- solve(t(X_uczacy)%*%X_uczacy) %*% t(X_uczacy) %*% Y_uczacy
+  
+  #Wyznaczamy wartości prognozowane (prawdopodobieństwo a posteriori)
+  Y_prawd_uczacy <- X_uczacy%*%B_wsp_uczacy
+  
+  klasy_uczacy <- levels(uczacy[[gatunek]])
+  maks_ind_uczacy<- apply(Y_prawd_uczacy,1,FUN = function(x) which.max(x))
+  
+  prognozowane_etykiety_uczacy <- klasy_uczacy[maks_ind_uczacy]
+  
+  rzecz_etykiety_uczacy <- etykiety_klas_uczacy
+  
+  macierz_pomylek_uczacy<- table(rzecz_etykiety_uczacy, prognozowane_etykiety_uczacy)  
+  dokl_klasyfikacji_uczacy <- sum(diag(macierz_pomylek_uczacy))/dim(uczacy)[1]
+  
+  ### Testowy
+  X_test <- cbind(1, as.matrix(testowy[, -which(colnames(uczacy) == gatunek)]))
+  X_test <- as.matrix(X_test)
+  
+  # Obliczamy prognozowane prawdopodobieństwa dla zbioru testowego
+  Y_prawd_test <- X_test %*% B_wsp_uczacy  # używamy współczynników ze zbioru uczącego
+  
+  
+  klasy_testowy <- levels(testowy[[gatunek]])
+  maks_ind_testowy <- apply(Y_prawd_test, 1, FUN = function(x) which.max(x))
+  prognozowane_etykiety_testowy <- klasy_testowy[maks_ind_testowy]
+  
+  rzecz_etykiety_testowy<- testowy[[gatunek]]
+  macierz_pomylek_testowy <- table(rzecz_etykiety_testowy, prognozowane_etykiety_testowy)
+  dokl_klasyfikacji_testowy <- sum(diag(macierz_pomylek_testowy)) / dim(testowy)[1]
+  
+  return(list(dokl_klasyfikacji_uczacy, dokl_klasyfikacji_testowy))
+}
+
+
+wyniki_tabela <- data.frame(
+  proporcja = c("1/6", "2/6", "3/6", "4/6", "5/6"), 
+  iris_uczacy = numeric(5),
+  iris_testowy = numeric(5),
+  iris_rozsz_uczacy = numeric(5),
+  iris_rozsz_testowy = numeric(5),
+  stringsAsFactors = FALSE
+)
+
+lista_proporcji <- list(1/6, 2/6, 3/6, 4/6, 5/6)
+
+for (i in seq_along(lista_proporcji)) {
+  prop <- lista_proporcji[[i]]
+  
+  wynik_iris <- policz_dokladnosc_klasyf(iris, "Species", proporcja_ucz_test = prop)
+  
+  wynik_rozsz <- policz_dokladnosc_klasyf(iris_rozszerz, "S", proporcja_ucz_test = prop)
+  
+  wyniki_tabela[i, 2:5] <- c(wynik_iris[[1]], wynik_iris[[2]], 
+                            wynik_rozsz[[1]], wynik_rozsz[[2]])
+}
+
+tabela_proporcje <- xtable(
+  wyniki_tabela,
+  caption = "Porównanie dokładności klasyfikacji dla różnych proporcji podziału",
+  label = "tab:dokladnosci_proporcje",
+  digits = c(0, 0, 3, 3, 3, 3),
+  align = c("c", "c", "c","c","c","c")  
+)
+
+names(tabela_proporcje) <- c("Proporcja (zb. uczący)", "Iris (uczący)", "Iris (testowy)", 
+                         "Iris rozsz. (uczący)", "Iris rozsz. (testowy)")
+
+print(tabela_proporcje,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",      
+      size = "normalsize",
+      comment = FALSE,
+      sanitize.text.function = function(x) x)
+```
+
+Analizując tabelę \ref{tab:dokladnosci_proporcje} możemy zauważyć, że w przypadku domyślnego zbioru `iris` dokładność klasyfikacji, zarówno dla zbioru uczącego jak i testowego, jest bliska 85% (różnice kilku punktów procentowych). Największą różnicę model osiągnął dla zbioru uczącego zawierającego $\frac{1}{3}$ wszystkich obserwacji zbioru `iris`, jednak najgorszy błąd występuje dla proporcji *$\frac{1}{6}$*. O wiele większe różnice w wynikach widoczne są dla zbioru o rozszerzonej przestrzeni cech. Największa różnica wystąpiła dla proporcji *$\frac{1}{6}$*, gdzie mamy idealną klasyfikację dla zbioru uczącego, natomiast dla zbioru testowego wynik jest o kilka punktów procentowych gorszy. Wystepuje zatem ryzyko przeuczenia modelu. Może to być spowodowane tym, że mamy zbyt mało danych do wyuczenia modelu. Natomiast wraz ze wzrostem liczby obserwacji w zbiorze uczącym dokladność klasyfikacji spada, a na zbiorze testowym rośnie. W przypadkach proporcji $\frac{3}{6}, \frac{4}{6}, \frac{5}{6}$ różnica błędów jest znacznie mniejsza (dla proporcji $\frac{5}{6}$ mamy idealną dokładność klasyfikacji).
+
+
+## Wnioski 
+
+```{r tabela_zestawienie_dokladnosci_iris, results='asis'}
+# Zestawienie dokladnosci dla obu modeli
+dokladnosc_iris <- data.frame(
+  "Zbiór" = c("Uczący","Testowy", "Uczący (rozszerzony)", "Testowy (rozszerzony)"),
+  "Dokładność klasyfikacji" =  c(dokl_klasyfikacji_uczacy,dokl_klasyfikacji_testowy, dokl_klasyfikacji_uczacy_rozsz, dokl_klasyfikacji_testowy_rozsz)
+)
+
+tabela_zestawienie_dokl <- xtable(
+  dokladnosc_iris,
+  caption = "Dokładność klasyfikacji dla zbioru uczącego i testowego danych iris",
+  label = "tab:zestaw_dokl_iris",
+  align = c("c", "c", "c")  
+)
+
+print(tabela_zestawienie_dokl,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",      
+      size = "normalsize",
+      comment = FALSE,
+      digits = c(0, 0, 0),
+      sanitize.colnames.function = function(x){
+        c("Zbiór", "Dokładność klasyfikacji")
+      })
+```
+
+Podsumowując przeprowadzoną analizę i tabele \ref{tab:dokladnosci_proporcje} i \ref{tab:zestaw_dokl_iris}, możemy wyciągnąć następujące wnioski:
+
+* Zmiana proporcji podziałów na zbiór testowy i uczący nie ma znacznego wpływu na dokładność klasyfikacji w przypadku podstawowego zbioru danych `iris`. Powodem może być zjawisko częściowego maskowania klas.
+* Zastosowanie przestrzeni cech rozszerzonej o wielomiany stopnia 2 gwarantuje niemal doskonałą klasyfikację. Eliminujemy w ten sposób zjawisko maskowania klas.
+* Podstawowy zbiór `iris` jest dość odporny na przeuczenie modelu. Biorąc nawet drastyczny podział ($\frac{1}{6}$) wyniki są podobne do wyników z podziału domyślnego.
+* Klasyfikacja oparta na modelu regresji liniowej jest dość dobrym modelem dla zbioru `iris`, odpornym w dużej mierze na przeuczenie. Jedynym problemem jest częściowe maskowanie klas, któremu można w prosty sposób zaradzić, rozszerzając przestrzeń cech.
+
+
+\vspace{2cm}
+# Zadanie 2
+
+## Wybór i zapoznanie się z danymi 
+
+```{r wczytanie danych Vehicle}
+data("Vehicle")
+```
+
+Wybraliśmy zbiór `Vehicle`, który zawiera informacje opisujące kształty pojazdów. Znajduje się w nim `r nrow(Vehicle)` obserwacji  podzielonych na cztery klasy: Bus (autobus piętrowy), Opel (Opel Manta 400), Saab (Saab 9000) i Van (Chevrolet van).
+
+Poniżej znajduje się tabela przedstawiająca podgląd danych.
+
+```{r struktura_danych_zbioru_wehicle, results='asis'}
+struktura_danych_vehicle <- data.frame(
+  Zmienna = names(Vehicle),
+  Opis = c("(Compactness) - stopień zwartości kształtu",
+           "(Circularity) - bliskość kształtu do koła",
+           "(Distance Circularity) - odległość od okręgu referencyjnego",
+           "(Radius Ratio) - stosunek promieni",
+           "(Principal axis aspect ratio) - stosunek osi głównej do drugorzędnej",
+           "(Max length aspect ratio) - stosunek maksymalnej długości do szerokości",
+           "(Scatter ratio) - stopień rozproszenia",
+           "(Elongatedness) - Wydłużenie kształtu",
+           "(Principal axis rectangularity) - prostokątność względem osi głównej",
+           "(Max length rectangularity) - prostokątność względem osi maksymalnej długości",
+           "(Scaled variance along major axis) - zeskalowana wariancja wzdłuż osi głównej",
+           "(Scaled variance along minor axis) - zeskalowana wariancja wzdłuż osi drugorzędnej",
+           "(Scaled radius of gyration) - zeskalowany promień bezwładności",
+           "(Skewness about major axis) - skośność względem osi głównej",
+           "(Skewness about minor axis) - skośność względem osi drugorzędnej",
+           "(Kurtosis about minor axis) - kurtoza względem osi drugorzędnej",
+           "(Kurtosis about major axis) - kurtoza względem osi głównej",
+           "(Hollows ratio) - stosunek przestrzeni pustej do całkowitej",
+           "(Class) - typ samochodu"
+           
+  ),
+  Typ = sapply(Vehicle, function(x) paste(class(x), collapse = ", ")),
+  Przykładowe_wartości = sapply(Vehicle, function(x) paste(head(x, 3), collapse = ", "))
+)
+
+library(xtable)
+xtable_vehicle <- xtable(
+  struktura_danych_vehicle,
+  caption = "Struktura zbioru danych Vehicle",
+  label = "tab:vehicle_opis",
+  align = c("l", "l", "l", "l", "l")
+)
+
+print(xtable_vehicle,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      comment = FALSE,
+      table.placement = "H",
+      scalebox=0.8)
+
+```
+
+
+Typy są przypisane poprawnie. Dane mają wymiary: `r dim(Vehicle)`. Jest jedna zmienna typu factor "Class", która zawiera informacje o przynależności do jednej spośród czterech klas: bus, opel, saab, van. Pozostałe 18 to zmienne numeryczne.
+Ponadto przyglądając się danym za pomocą `View` możemy zaobserwować, że w zbiorze nie ma nietypowego kodowania zmiennych brakujących, co więcej ilość NA wynosi `r sum(is.na(Vehicle))`.
+
+```{r opis danych Vehicle, echo=FALSE, eval=FALSE}
+dim(Vehicle)
+# Mamy 19 cech i 846 przypadków.
+
+str(Vehicle)
+
+sum(is.na(Vehicle))
+# Brak nietypowych wartości.
+# Brak wartości NA.
+
+str(Vehicle)
+# Tak, mamy poprawnie przypisane typy.
+
+```
+
+
+
+## Cel analizy
+
+Naszym celem jest porównać skuteczność algorytmów, które po odpowiednim wytrenowaniu, powinny być w stanie automatycznie przypisać klasę dla danej obserwacji na podstawie danych numerycznych opisujących kształt pojazdu.
+
+W analizie zastosujemy poznane algorytmy klasyfikacji i szczegółowo porównamy ich
+dokładność. Porównanie uwzględnia następujące algorytmy:
+
+* metoda k-najbliższych sąsiadów (k-Nearest Neighbors),
+* drzewa klasyfikacyjne (classification trees),
+* naiwny klasyfikator bayesowski (naive Bayes classifier).
+
+
+
+## Wstępna analiza danych 
+
+Przeprowadzamy wstępną analizę danych zbioru `Vehicle` w celu wybrania cech o najlepszej dyskryminacji. W tym celu wykorzystane zostaną wykresy skrzypcowe, prezentujące rozkład poszczególnych zmiennych w zależności od typu samochodu. Przydatne może się również okazać przeprowadzenie testu ANOVA.
+
+### Rozkład klas 
+
+
+```{r rozkład klas, fig.cap = "\\label{fig:rozklad_klas}Wykres słupkowy, przedstawiający ilość obserwacji dla poszczególnej klasy"} 
+ggplot(Vehicle, aes(x = Class, fill = Class)) +
+  geom_bar() +
+  labs(title = "Rozkład klas w zbiorze Vehicle",
+       x = "Klasa",
+       y = "Liczba obserwacji") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+```
+
+Klasy są dość proporcjonalne co można zauważyć na wykresie \ref{fig:rozklad_klas}. Różnica między najmniej liczną i najbardziej liczną klasą to
+**`r max(table(Vehicle$Class))-min(table(Vehicle$Class))`** przy **`r nrow(Vehicle)`** przypadkach.
+
+```{r dokladnosc_klasyfikacja_jedna_klasa, echo=FALSE}
+dominujaca_klasa <- names(which.max(table(Vehicle$Class)))
+dokladnosc <- max(table(Vehicle$Class)) / nrow(Vehicle)
+blad <- 1 - dokladnosc
+```
+
+Gdybyśmy przypisali wszystkie obiekty do jednej, najczęściej występującej klasy,
+uzyskalibyśmy błąd klasyfikacji na poziomie **`r round(blad*100)`**%, co pokazuje,
+że taki naiwny model byłby nieskuteczny.
+
+
+
+### Wariancja poszczególnych cech 
+
+Wariancja poszczególnych cech:
+
+```{r czy_standaryzować?}
+num_vars <- Vehicle[sapply(Vehicle, is.numeric)]
+
+Vehicle_sd <- sapply(num_vars, sd)
+round(Vehicle_sd,3)
+```
+
+Najmniejsza wariancja to **`r round(min(Vehicle_sd)) `**, a największa to **`r round(max(Vehicle_sd))`**.
+Bardzo duże różnice w wariancji poszczególnych cech. Zatem konieczne jest zastosowanie standaryzacji, w szczególności dla k-NN (w przeciwnym wypadku wpływ cech będzie niezrównoważony, co może doprowadzić do zdominowania odległości przez cechy o większym zakresie wartości).
+Choć dla drzew klasyfikacyjnych oraz naiwnego klasyfikatora bayesowskiego standaryzacja nie jest istotna to wykorzystamy standaryzowany zbiór dla wszystkich algorytmów w celu spójności. 
+
+
+### Test ANOVA
+
+Przeprowadzimy test ANOVA, który pomaga w rozstrzygnięciu, które cechy dobrze rozróżniają grupy pojazdów. Test porównuje dwie wariancje: międzygrupową i wewnątrzgrupową, a potem oblicza statystykę:
+$$ F = \frac{\text{wariancja międzygrupowa}}{\text{wariancja wewnątrzgrupowa}} $$ Duże F Świadczy o istotnych różnicach średnich między grupami.
+
+```{r anova_test, fig.cap = "\\label{fig:anova_wykres}Wykres słupkowy wartości statystyki F otrzymane za pomocą testu ANOVA dla poszczególnych cech zbioru Vehicle"}
+wyniki_anova <- list()
+
+# pomijamy ostatnią kolumnę (klasę)
+cechy <- names(Vehicle)[-ncol(Vehicle)]
+
+for(cecha in cechy) {
+  form <- as.formula(paste(cecha, "~ Class"))
+  wyniki_anova[[cecha]] <- aov(form, data = Vehicle)
+}
+
+
+statystyki <- data.frame(
+  Cecha = cechy,
+  F_value = numeric(length(cechy)),
+  p_value = numeric(length(cechy)),
+  stringsAsFactors = FALSE
+)
+
+
+for(i in seq_along(cechy)) {
+  podsumowanie <- summary(wyniki_anova[[i]])
+  statystyki$F_value[i] <- podsumowanie[[1]]$"F value"[1]
+  statystyki$p_value[i] <- podsumowanie[[1]]$"Pr(>F)"[1]
+}
+
+statystyki <- statystyki[order(-statystyki$F_value), ]
+
+ggplot(statystyki, aes(x = reorder(Cecha, F_value), y = F_value)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Wartości statystyki F (testu ANOVA)",
+       x = "Cecha",
+       y = "Wartość statystyki F") 
+```
+
+Na wykresie \ref{fig:anova_wykres} widzimy, że `Elong`, `Scat.Ra`, `Sc.Var.Maxis`, `D.Circ`, `Pr.Axis.Rect`, `Sc.Var.maxis` mają potencjał do bycia cechami, które dobrze rozróżniają grupy pojazdów.
+
+### Wykresy skrzypcowe
+
+```{r wykresy skrzypcowe_1, fig.height=6, fig.width=6, fig.cap = "\\label{fig:zdol_dyskr1}Wybrane wykresy skrzypcowe pomagające w oszacowaniu zdolności dyskryminacyjnych poszczególnych cech" }
+# Lista nazw cech numerycznych
+num_cols <- names(Vehicle)[sapply(Vehicle, is.numeric)]
+num_cols1 <- num_cols[1:9]
+num_cols2 <- num_cols[-c(1:9)]
+
+# Tworzenie wykresów
+plots <- map(num_cols1, ~{
+  ggplot(Vehicle, aes(x = Class, y = .data[[.x]], fill = Class)) +
+    geom_violin()+
+    labs(title = .x, y = "Wartość", x = "") +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2")+
+    theme(plot.margin = margin(1, 5, 1, 5),
+          legend.position = 'None')
+})
+
+wrap_plots(plots, ncol = 3)
+```
+
+```{r wykresy skrzypcowe_2, fig.height=6, fig.width=6, fig.cap = "\\label{fig:zdol_dyskr2}Wybrane wykresy skrzypcowe pomagające w oszacowaniu zdolności dyskryminacyjnych poszczególnych cech" }
+
+# Tworzenie wykresów
+plots <- map(num_cols2, ~{
+  ggplot(Vehicle, aes(x = Class, y = .data[[.x]], fill = Class)) +
+    geom_violin()+
+    labs(title = .x, y = "Wartość", x = "") +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2")+
+    theme(plot.margin = margin(1, 5, 1, 5),
+          legend.position = 'None')  
+})
+
+wrap_plots(plots, ncol = 3)
+
+```
+
+
+\vspace{1cm}
+Na podstawie wykresu \ref{fig:zdol_dyskr1} oraz \ref{fig:zdol_dyskr2}, najlepszymi zdolnościami dyskryminacyjnymi cechują się zmienne:
+
+* `Comp`, ponieważ rozkład zmiennej dla każdej klasy jest choć trochę przesunięte względem pozostałych,
+* `D.Circ`, ponieważ klasy Bus i Van są dość dobrze oddzielone od Opel i Saab,
+* `Elong` dość dobrze odróżnia Vana,
+* `Scat.Ra` odróźnia Vana od reszty,
+* `Holl.Ra` odróżnia Busa.
+
+Brak cechy, która wyraźnie odróżnia Opla Mante 400 od Saaba 9000, ale to prawdopodobnie dlatego, że te samochody mają bardzo podobny kształt. Według testu ANOVA `Holl.Ra` i `Comp` są dość przeciętne pod względem róźnicowania klas, ale weźniemy je pod uwagę, ponieważ wykresy skrzypcowe zdradzają ich ukryty potencjał.
+
+
+## Ocena dokładności klasyfikacji i porównanie metod
+
+W niniejszym podrozdziale zajmiemy się sprawdzeniem błędów klasyfikacji dla wszystkich 3 algorytmów na całym zbiorze danych. Porównamy błąd otrzymany na zbiorze uczącym i testowym, dodatkowo spojrzymy na macierze pomyłek.
+
+### Metoda k-Nearest Neighbors
+
+Metoda k-NN (k-Nearest Neighbors) polega na klasyfikowaniu obiektów na podstawie ich k najbliższych sąsiadów w przestrzeni cech. Klasa nowego punktu jest zazwyczaj określana większością głosów spośród tych sąsiadów.
+
+#### Jednorazowy podział 
+
+```{r standaryzacja}
+# Dokonujemy standaryzacji
+Vehicle_scaled <- as.data.frame(scale(Vehicle[, -which(names(Vehicle) == "Class")]))
+Vehicle_scaled$Class <- Vehicle$Class
+```
+
+
+Standaryzowany zbiór `Vehicle` dzielimy na uczący ($\frac{2}{3}$ zbioru) i testowy ($\frac{1}{3}$ zbioru) przy użyciu funkcji `sample`. Liczbę sąsiadów ustalamy na `k = 5`.
+
+```{r ręczny k-NN uczący, fig.cap = "\\label{fig:knn_matrix_ler}Macierz pomyłek przedstawiająca błędy w klasyfikacji na zbiorze uczącym dla metody k-NN"}
+# losowanie podzbiorów
+n <- dim(Vehicle_scaled)[1]
+
+# losujemy obiekty do zbioru uczącego i testowego
+set.seed(11)
+learning.set.index <- sample(1:n,2/3*n)
+
+# tworzymy zbiór uczący i testowy
+learning.set <- Vehicle_scaled[learning.set.index,]
+test.set     <- Vehicle_scaled[-learning.set.index,]
+
+
+# rzeczywiste rodzaje pojazdów
+etykietki.rzecz <- test.set$Class
+
+# teraz robimy prognozę
+etykietki.prog <- knn(learning.set[,-19], test.set[,-19], learning.set$Class, k=5)
+
+# macierz pomyłek (ang. confusion matrix)
+macierz.testowy.knn <- table(etykietki.prog,etykietki.rzecz)
+
+# błąd klasyfikacji na zbiorze testowym
+n.test <- dim(test.set)[1]
+error.testowy.knn<-(n.test - sum(diag(macierz.testowy.knn))) / n.test
+
+
+# błąd klasyfikacji na zbiorze uczącym
+etykiety.prog.train <- knn(learning.set[,-19], learning.set[,-19], learning.set$Class, k=5)
+
+macierz.uczący.knn <- table(etykiety.prog.train, learning.set$Class)
+
+n.learning <- dim(learning.set)[1]
+error.uczący.knn<-(n.learning - sum(diag(macierz.uczący.knn))) / n.learning
+
+df <- as.data.frame(macierz.uczący.knn)
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y 
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze uczącym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+```
+
+Błąd klasyfikacji dla zbioru uczącego wynosi `r round(error.uczący.knn*100)`%.
+
+
+```{r ręczny k-NN testowy, fig.cap = "\\label{fig:knn_matrix_tes}Macierz pomyłek przedstawiająca błędy w klasyfikacji na zbiorze testowym dla metody k-NN"}
+
+df <- as.data.frame(macierz.testowy.knn)
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y (Predykcja)
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze testowym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+
+```
+
+Błąd klasyfikacji dla zbioru testowego wynosi `r round(error.testowy.knn*100)`%.
+
+
+Wnioski:
+
+* Błąd na zbiorze uczącym `r round(error.uczący.knn*100)`% oznacza, że klasyfikator nie dopasował się perfekcyjnie, ale też nie jest przeuczony,   
+
+* Błąd na zbiorze testowym `r round(error.testowy.knn*100)`% jest wyższy niż na uczącym i może oznaczać, że dane są trudne do klasyfikacji lub wybraliśmy nieoptymalny parametr `k`, czyli liczbę sąsiadów.
+
+
+*Uwaga*: Wyniki mogą być przypadkowe, ponieważ przeprowadziliśmy klasyfikację tylko na jednym konkretnym podziale danych. 
+
+#### Zaawansowane schematy oceny dokładności 
+
+```{r wielokrotny knn}
+# KNN cross validation + bootstrap + 632plus
+library(ipred)
+
+my.predict  <- function(model, newdata) {
+  preds <- predict(model, newdata = newdata, type = "class")
+  factor(preds, levels = levels(newdata$Class))  # gwarantuje typ factor
+}
+
+my.ipredknn <- function(formula1, data1, ile.sasiadow) ipredknn(formula=formula1,data=data1,k=ile.sasiadow)
+
+# porównanie błędów klasyfikacji: cv, boot, .632plus
+cross.knn<-errorest(Class ~., Vehicle_scaled, model=my.ipredknn, predict=my.predict, estimator="cv",     est.para=control.errorest(k = 10), ile.sasiadow=5)
+boot.knn<-errorest(Class ~., Vehicle_scaled, model=my.ipredknn, predict=my.predict, estimator="boot",   est.para=control.errorest(nboot = 50), ile.sasiadow=5)
+plus.knn<-errorest(Class ~., Vehicle_scaled, model=my.ipredknn, predict=my.predict, estimator="632plus",  est.para=control.errorest(nboot = 50), ile.sasiadow=5)
+```
+
+
+W celu bardziej rzetelnej oceny jakości klasyfikatora k-NN stosujemy trzy metody walidacji wielokrotnej: walidację krzyżową, bootstrap oraz poprawiony bootstrap `.632+`.
+
+Oszacowane błędy klasyfikacji dla standaryzowanego zbioru danych `Vehicle` wynoszą:
+
+* Walidacja krzyżowa: `r round(100 * cross.knn$error, 1)`%
+* Bootstrap: `r round(100 * boot.knn$error, 1)`%
+* Metoda `.632+`: `r round(100 * plus.knn$error, 1)`%
+
+Najniższy błąd uzyskujemy metodą `.632+`, co sugeruje, że rzeczywisty błąd klasyfikatora wynosi około `r round(100 * plus.knn$error, 1)`%. Wynik ten jest zbliżony do wcześniej uzyskanego błędu na zbiorze testowym (`r round(error.testowy.knn*100)`%), co potwierdza stabilność klasyfikatora k-NN. Wyższy błąd w metodzie bootstrap wskazuje na jej tendencję do zawyżania oszacowań.
+
+
+### Naiwny klasyfikator bayesowski 
+
+Metoda Naiwnego Bayesa to klasyfikator oparty na twierdzeniu Bayesa, zakładający niezależność cech. Szacuje prawdopodobieństwo przynależności obiektu do danej klasy, wybierając tę z największym prawdopodobieństwem posteriori.
+
+#### Jednorazowy podział 
+
+Standaryzowany zbiór `Vehicle` dzielimy na uczący ( $\frac{2}{3}$ zbioru) i testowy ( $\frac{1}{3}$ zbioru) przy użyciu funkcji `sample`.
+
+```{r ręczny Bayes uczący, fig.cap = "\\label{fig:b_matrix_ler}Macierz pomyłek przedstawiająca błędy w klasyfikacji na zbiorze uczącym dla klasyfikatora bayesowskiego"}
+set.seed(11)
+n <- nrow(Vehicle_scaled)
+learning.set.index <- sample(1:n, 2/3 * n)
+learning.set <- Vehicle_scaled[learning.set.index, ]
+test.set <- Vehicle_scaled[-learning.set.index, ]
+
+model_nb <- naiveBayes(Class ~ ., data = learning.set)
+
+# na uczącym
+etykiety.prog.learn <- predict(model_nb, newdata = learning.set)
+etykiety.rzecz.learn <- learning.set$Class
+
+macierz.uczący.b<- table(etykiety.prog.learn, etykiety.rzecz.learn)
+
+n.learning <- nrow(learning.set)
+error.uczący.b <- (n.learning - sum(diag(macierz.uczący.b))) / n.learning
+
+df <- as.data.frame(macierz.uczący.b)
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y 
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze uczącym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+```
+
+Błąd klasyfikacji dla zbioru uczącego wynosi `r round(error.uczący.b*100)`%
+
+```{r ręczny bayes testowy, fig.cap = "\\label{fig:b_matrix_tes}Macierz pomyłek przedstawiająca błędy w klasyfikacji na zbiorze testowym dla klasyfikatora bayesowskiego"}
+# na testowym
+etykiety.prog.test <- predict(model_nb, newdata = test.set)
+etykiety.rzecz.test <- test.set$Class
+
+macierz.testowy.b <- table(etykiety.prog.test, etykiety.rzecz.test)
+
+n.test <- nrow(test.set)
+error.testowy.b <- (n.test - sum(diag(macierz.testowy.b))) / n.test
+
+
+df <- as.data.frame(macierz.testowy.b)
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y (Predykcja)
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze testowym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+```
+
+Błąd klasyfikacji dla zbioru testowego wynosi `r round(error.testowy.b*100)`%
+
+Wnioski: 
+
+* Bardzo duży błąd na zbiorze uczącym jak i testowym oznacza, że model nie dopasował się do danych. Prawdopodobnie wynika to z tego, że cechy nie są warunkowo niezależne co łamie założenia tej metody. 
+
+* Model potrafi skutecznie odróżnić tylko klasę `Van` co może oznaczać, że jest ona najbardziej odrębna od pozostałych klas.
+
+#### Zaawansowane schematy oceny dokładności 
+
+```{r wielokrotny bayes}
+# Naiwny klasyfikator Bayesowski cross validation + bootstrap + 632plus
+
+my.predict.nb <- function(model, newdata) {
+  predict(model, newdata = newdata)
+}
+
+my.nb <- function(formula1, data1) {
+  naiveBayes(formula = formula1, data = data1)
+}
+
+cross.b <- errorest(Class ~ ., data = Vehicle_scaled,
+                     model = my.nb,
+                     predict = my.predict.nb,
+                     estimator = "cv",
+                     est.para = control.errorest(k = 10))
+
+boot.b <- errorest(Class ~ ., data = Vehicle_scaled,
+                    model = my.nb,
+                    predict = my.predict.nb,
+                    estimator = "boot",
+                    est.para = control.errorest(nboot = 50))
+
+plus.b <- errorest(Class ~ ., data = Vehicle_scaled,
+                    model = my.nb,
+                    predict = my.predict.nb,
+                    estimator = "632plus",
+                    est.para = control.errorest(nboot = 50))
+
+
+
+```
+
+W celu bardziej rzetelnej oceny jakości naiwnego klasyfikatora bayesowskiego stosujemy trzy metody walidacji wielokrotnej: walidację krzyżową, bootstrap oraz poprawiony bootstrap `.632+`.
+
+Oszacowane błędy klasyfikacji dla standaryzowanego zbioru danych `Vehicle` wynoszą:
+
+* Walidacja krzyżowa: `r round(100 * cross.b$error, 1)`%
+* Bootstrap: `r round(100 * boot.b$error, 1)`%
+* Metoda `.632+`: `r round(100 * plus.b$error, 1)`%
+
+Otrzymaliśmy jeszcze większe błędy co potwierdza, że naiwny klasyfikator bayesowski nie nadaje się do użycia na zbiorze danych `Vehicle`.
+
+
+### Drzewo klasyfikacyjne
+
+Drzewo klasyfikacyjne to model predykcyjny, który podejmuje decyzje na podstawie sekwencji warunków logicznych, dzieląc dane na podzbiory według cech. Struktura drzewa umożliwia łatwą interpretację i wizualizację procesu klasyfikacji.
+
+#### Jednorazowy podział 
+
+
+
+```{r ręczne drzewo uczący, echo=FALSE }
+set.seed(11)
+
+train_index <- sample(1:nrow(Vehicle_scaled), size = 2/3 * nrow(Vehicle_scaled))
+train_set <- Vehicle_scaled[train_index, ]
+test_set  <- Vehicle_scaled[-train_index, ]
+
+# Budowa drzewa na zbiorze uczącym
+tree_model <- rpart(Class ~ ., data = train_set, method = "class", cp = 0.01)
+
+# Tabela błędów CV i wybór cp metodą 1-SE
+cp_table <- tree_model$cptable
+min_error <- which.min(cp_table[, "xerror"])
+xerror_min <- cp_table[min_error, "xerror"]
+xstd_min  <- cp_table[min_error, "xstd"]
+se_threshold <- xerror_min + xstd_min
+cp_1se <- max(cp_table[cp_table[, "xerror"] <= se_threshold, "CP"])
+
+# Przycięcie drzewa
+pruned_tree <- prune(tree_model, cp = cp_1se)
+
+# --------------------- Predykcja i ocena ---------------------
+
+# Predykcja dla drzewa nieobciętego
+# Predykcja na zbiorze uczącym
+tree_pred_train_nieobciety <- predict(tree_model, newdata = train_set, type = "class")
+macierz.uczący.tree_nieobciety <- table(tree_pred_train_nieobciety, train_set$Class)
+error.uczący.tree_nieobciety <- mean(tree_pred_train_nieobciety != train_set$Class)
+
+# Predykcja na zbiorze testowym
+tree_pred_test_nieobciety <- predict(tree_model, newdata = test_set, type = "class")
+macierz.testowy.tree_nieobciety <- table(tree_pred_test_nieobciety, test_set$Class)
+error.testowy.tree_nieobciety <- mean(tree_pred_test_nieobciety != test_set$Class)
+
+# Predykcja dla drzewa przyciętego
+# Predykcja na zbiorze uczącym
+tree_pred_train <- predict(pruned_tree, newdata = train_set, type = "class")
+macierz.uczący.tree <- table(tree_pred_train, train_set$Class)
+error.uczący.tree <- mean(tree_pred_train != train_set$Class)
+
+# Predykcja na zbiorze testowym
+tree_pred_test <- predict(pruned_tree, newdata = test_set, type = "class")
+macierz.testowy.tree <- table(tree_pred_test, test_set$Class)
+error.testowy.tree<- mean(tree_pred_test != test_set$Class)
+
+rozmiar_drzewa_nieprzycięte <- sum(tree_model$frame$var == "<leaf>")
+```
+
+Standaryzowany zbiór `Vehicle` dzielimy na uczący ( $\frac{2}{3}$ zbioru) i testowy ( $\frac{1}{3}$ zbioru) przy użyciu funkcji `sample`. Na początku nie przycinamy zbytnio drzewa `cp=0.01`, jego rozmiar wynosi `r rozmiar_drzewa_nieprzycięte`.
+
+```{r drzewo_podstawowe_wykres, fig.width= 6, fig.height=6, fig.cap = "\\label{fig:drzewo_wyk} Wizualizacja drzewa z podstawowymi parametrami dla cp=0.01"} 
+rpart.plot(tree_model, 
+           main = paste("Pełne drzewo (cp=0.01), rozmiar =",rozmiar_drzewa_nieprzycięte),
+           box.palette = "Blues",
+           shadow.col = "gray",
+           type = 4,
+           extra = 101,
+           nn = TRUE,
+           tweak = 1.1)
+
+```
+
+Wykres \ref{fig:drzewo_wyk} umożliwia bezpośredni wgląd w decyzje podejmowane przez model. Największe role odgrywają zmienne `Elong` i `Max.L.Ra`, gdyż definiują początkowe podziały. Przyglądając się liściom, możemy zauważyć, że `van` i `bus` charakteryzują się największą czystością węzłów. Największym problemem w klasyfikacji jest oddzielenie typu `opel` od `saab` (W wielu liściach jest zbliżona liczba obserwacji z obu tych klas). Zmienne takie jak `Skew.maxis` i `Ra.Gyr` nie wnoszą wiele do poprawy klasyfikacji, zatem widoczny jest potencjał do przycięcia drzewa i uproszczenia modelu.
+
+```{r ręczne drzewo uczący macierz, fig.cap = "\\label{fig:tree_matrix_ler} Macierz pomyłek przedstawiająca błędy w klasyfikacji na zbiorze uczącym dla drzewa klasyfikacyjnego"}
+
+df <- as.data.frame(macierz.uczący.tree_nieobciety)
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y (Predykcja)
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze testowym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+
+```
+
+Błąd klasyfikacji dla zbioru uczącego wynosi `r round(error.uczący.tree_nieobciety*100)`%
+
+```{r ręczne drzewo testowy, fig.cap = "\\label{fig:tree_matrix_tes} Macierz pomyłek przedstawiająca błędy w klasyfikacji na zbiorze testowym dla drzewa klasyfikacyjnego" }
+df <- as.data.frame(macierz.testowy.tree_nieobciety)
+names(df) <- c("Predykcja", "Rzeczywista", "Liczba")
+
+# Odwrócenie kolejności klas na osi Y (Predykcja)
+df$Predykcja <- factor(df$Predykcja, levels = rev(levels(df$Predykcja)))
+
+# Wykres
+ggplot(df, aes(x = Rzeczywista, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Liczba), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Macierz pomyłek na zbiorze testowym", x = "Rzeczywista klasa", y = "Predykowana klasa") +
+  theme_minimal()+
+  theme(legend.position = 'None')
+
+```
+
+Błąd klasyfikacji dla zbioru testowego wynosi `r round(error.testowy.tree_nieobciety*100)`%
+
+Wnioski:
+
+* Bardzo podobny błąd na zbiorze uczącym (`r round(error.uczący.tree_nieobciety*100)`%) i testowym (`r round(error.testowy.tree_nieobciety*100)`%) oznacza, że klasyfikator nie jest przeuczony. Ponadto błąd klasyfikacji na zbiorze testowym jest podobny do metody k-NN (`r round(error.testowy.knn*100)`%)
+
+
+#### Zaawansowane schematy oceny dokładności 
+
+```{r wielokrotne drzewo}
+
+# Funkcja do budowy drzewa z metodą 1SE
+my.rpart.full <- function(formula, data, ...) {
+  rpart(formula, data = data, method = "class", cp = 0.01)
+}
+
+# Funkcja do predykcji klas
+my.rpart.predict <- function(object, newdata) {
+  predict(object, newdata = newdata, type = "class")
+}
+
+# Cross-validation (np. 10-krotna)
+cross.tree <- errorest(Class ~ ., data = Vehicle_scaled,
+                           model = my.rpart.full,
+                           predict = my.rpart.predict,
+                           estimator = "cv",
+                           est.para = control.errorest(k = 10))
+
+# Bootstrap
+boot.tree <- errorest(Class ~ ., data = Vehicle_scaled,
+                          model = my.rpart.full,
+                          predict = my.rpart.predict,
+                          estimator = "boot",
+                          est.para = control.errorest(nboot = 50))
+
+# .632plus
+plus.tree <- errorest(Class ~ ., data = Vehicle_scaled,
+                          model = my.rpart.full,
+                          predict = my.rpart.predict,
+                          estimator = "632plus",
+                          est.para = control.errorest(nboot = 50))
+```
+
+W celu bardziej rzetelnej oceny jakości drzewa klasyfikacyjnego możemy zastosować trzy metody walidacji wielokrotnej: walidację krzyżową, bootstrap oraz poprawiony bootstrap `.632+`.
+
+Oszacowane błędy klasyfikacji dla standaryzowanego zbioru danych `Vehicle` wynoszą:
+
+* Walidacja krzyżowa: `r round(100 * cross.tree$error, 1)`%
+* Bootstrap: `r round(100 * boot.tree$error, 1)`%
+* Metoda `.632+`: `r round(100 * plus.tree$error, 1)`%
+
+Wyniki uzyskane zaawansowanymi metodami są trochę gorsze niż przy jednokrotnym podziale. Mamy okazję zauważyć, że warto stosować bardziej zaawansowane metody oceny dokładności, ponieważ przy jednokrotnym podziale mogliśmy po prostu mieć szczęście i dlatego wynik był lepszy.
+
+
+## Różne parametry i różne podzbiory cech
+
+W tym podrozdziale sprawdzimy jak wybranie podzbioru danych na podstawie wykresów skrzypcowych \ref{fig:zdol_dyskr1}, \ref{fig:zdol_dyskr2} i testu ANOVA \ref{fig:anova_wykres} wpływa na błąd klasyfikacji. Ponadto dla zbioru, który będzie dawać najlepszy wynik pozmieniamy parametry algorytmów i zobaczymy jak wpływają one na wyniki. 
+
+### Metoda k-Nearest Neighbors
+
+Ten podrozdział zaczniemy od obserwacji jak wybór różnych podzbiorów `Vehicle` wpływa na błąd klasyfikatora dla algorytmu k-NN.
+
+Przypomnijmy wyniki tego klasyfikatora gdy braliśmy po uwagę wszystkie zmienne numeryczne:
+
+* Walidacja krzyżowa: `r round(100 * cross.knn$error, 1)`%
+* Bootstrap: `r round(100 * boot.knn$error, 1)`%
+* Metoda `.632+`: `r round(100 * plus.knn$error, 1)`%
+
+```{r podzbiory knn}
+# KNN na podzbiorze
+
+my.predict  <- function(model, newdata) {
+  preds <- predict(model, newdata = newdata, type = "class")
+  factor(preds, levels = levels(newdata$Class)) 
+}
+
+my.ipredknn <- function(formula1, data1, ile.sasiadow) ipredknn(formula=formula1,data=data1,k=ile.sasiadow)
+
+
+wielokrotny.knn <- function(model,k) {
+  # porównanie błędów klasyfikacji: cv, boot, .632plus
+  cross.knn <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.ipredknn,
+    predict = my.predict,
+    estimator = "cv",
+    est.para = control.errorest(k = 15),
+    ile.sasiadow = k
+  )
+  boot.knn <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.ipredknn,
+    predict = my.predict,
+    estimator = "boot",
+    est.para = control.errorest(nboot = 50),
+    ile.sasiadow = k
+  )
+  plus.knn <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.ipredknn,
+    predict = my.predict,
+    estimator = "632plus",
+    est.para = control.errorest(nboot = 50),
+    ile.sasiadow = k
+  )
+  return(list(cross.knn = cross.knn, boot.knn = boot.knn, plus.knn = plus.knn))
+}
+```
+
+
+Zaczniemy od wyznaczenia błędu k-NN gdy podzbiór wybieramy kierując się wykresami skrzypcowymi na \ref{fig:zdol_dyskr1} oraz \ref{fig:zdol_dyskr2} .
+Na tej podstawie najbardziej obecującymi cechami są: `Comp`, `D.Circ`, `Elong`, `Scat.Ra`, `Holl.Ra`. W celu łatwiejszego odwoływania się do tego podzioru, nazwijmy go jako `model 1`.
+
+```{r podzbior_model_1}
+# Zaawansowane schematy oceny dokładnościwzględem cech, które dobrze wyglądały na wykresie 
+model1=(Class ~ Comp + D.Circ + Elong + Scat.Ra + Holl.Ra)
+set.seed(11)
+wyniki_1_k<-wielokrotny.knn(model1,5)
+```
+* Walidacja krzyżowa: `r round(100 * wyniki_1_k$cross.knn$error, 1)`%
+* Bootstrap: `r round(100 * wyniki_1_k$boot.knn$error, 1)`%
+* Metoda `.632+`: `r round(100 * wyniki_1_k$plus.knn$error, 1)`%
+
+Wybierając ten podzbiór tylko pogorszyliśmy wyniki.
+
+
+Wybierzmy więc inny kierując się również metodą ANOVA \ref{fig:anova_wykres} wybierzmy podzbiór (`model 2`): `Comp`, `D.Circ`, `Scat.Ra`, `Elong`, `Holl.Ra`, `Pr.Axis.Rect`, `Sc.Var.maxis`, `Sc.Var.Maxis`
+
+```{r podzbior_model_2}
+model2=(Class ~ Comp + D.Circ + Scat.Ra + Elong + Holl.Ra + Sc.Var.maxis + Pr.Axis.Rect + Sc.Var.Maxis)
+set.seed(11)
+wyniki_2_k<-wielokrotny.knn(model2,5)
+```
+* Walidacja krzyżowa: `r round(100 * wyniki_2_k$cross.knn$error, 1)`%
+* Bootstrap: `r round(100 * wyniki_2_k$boot.knn$error, 1)`%
+* Metoda `.632+`: `r round(100 * wyniki_2_k$plus.knn$error, 1)`%
+
+Wyniki wciąż są gorsze niż dla całego zbioru.
+
+
+
+Metodą prób i błędów możemy testować różne podzbiory. Na przykład: `Comp`, `Circ`, `D.Circ`, `Pr.Axis.Ra`, `Scat.Ra`, `Elong`, `Max.L.Ra`, `Sc.Var.maxis`, `Max.L.Rect`, `Pr.Axis.Rect`, `Ra.Gyr`. Nazwijmy ten podzbiór jako `model 3`
+
+```{r podzbior_model_3}
+model3=(Class ~ Comp + Circ + D.Circ+ Pr.Axis.Ra + Scat.Ra + Elong +Max.L.Ra + Sc.Var.maxis+ Max.L.Rect+ Pr.Axis.Rect +Ra.Gyr)
+set.seed(11)
+wyniki_3_k<-wielokrotny.knn(model3,5)
+```
+* Walidacja krzyżowa: `r round(100 * wyniki_3_k$cross.knn$error, 1)`%
+* Bootstrap: `r round(100 * wyniki_3_k$boot.knn$error, 1)`%
+* Metoda `.632+`: `r round(100 * wyniki_3_k$plus.knn$error, 1)`%
+
+Taki wybór znacznie poprawia wynik, względem tego który uzyskaliśmy dla całego zbioru. Widać, że ani wykresy skrzypcowe ani ANOVA nie pomogły nam w wyborze podzbioru, który daje lepszy wynik. W przypadku tego zbioru danych najlepiej wyznaczyć podzbiór ręcznie.
+
+
+
+Spróbujmy poprawić wynik dla tego podzbioru dobierając odpowiednią liczbę sąsiadów
+
+```{r liczba_sasiadow_wykres, fig.cap = "\\label{fig:knn_neighbors_graph}Wykres przedstawiający zależność błędu od liczby sąsiadów w metodzie k-NN (metoda walidacji krzyżowej)", fig.height=4.5}
+
+# Eksperyment: badamy wpływ liczby sąsiadów na skuteczność modelu
+liczba_sasiadow_zakres <- 1:15
+liczba_podzialow <- 15
+
+set.seed(11)
+wyniki1 <- sapply(liczba_sasiadow_zakres, function(k) {
+  errorest(model1, Vehicle_scaled, 
+           model = my.ipredknn, 
+           predict = my.predict, 
+           estimator = "cv", 
+           est.para = control.errorest(k = liczba_podzialow), 
+           ile.sasiadow = k)$error
+})
+
+set.seed(11)
+wyniki2 <- sapply(liczba_sasiadow_zakres, function(k) {
+  errorest(model2, Vehicle_scaled, 
+           model = my.ipredknn, 
+           predict = my.predict, 
+           estimator = "cv", 
+           est.para = control.errorest(k = liczba_podzialow), 
+           ile.sasiadow = k)$error
+})
+
+set.seed(11)
+wyniki3 <- sapply(liczba_sasiadow_zakres, function(k) {
+  errorest(model3, Vehicle_scaled, 
+           model = my.ipredknn, 
+           predict = my.predict, 
+           estimator = "cv", 
+           est.para = control.errorest(k = liczba_podzialow), 
+           ile.sasiadow = k)$error
+})
+
+
+dane_liczba_sasiadow <- data.frame(
+  k = rep(liczba_sasiadow_zakres, 3),
+  blad_klasyfikacji = c(wyniki1, wyniki2, wyniki3),
+  model = factor(rep(c("Model 1", "Model 2", "Model 3"), each = length(liczba_sasiadow_zakres)))
+)
+
+ggplot(dane_liczba_sasiadow, aes(x = k, y = blad_klasyfikacji, color = model, group = model)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Wpływ liczby sąsiadów na błąd klasyfikacji",
+    x = "k (liczba sąsiadów)",
+    y = paste0("Błąd klasyfikacji (",liczba_podzialow,"-fold CV)"),
+    color = "Model"
+  ) +
+  scale_x_continuous(breaks = liczba_sasiadow_zakres) +
+  scale_color_manual(values = c("Model 1" = "green", "Model 2" = "blue", "Model 3" = "red")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major = element_line(color = "gray90"),
+    legend.position = "bottom"
+  )
+
+```
+
+Okazuje się, że k = 5 sąsiadów to najlepszy wybór dla modelu 3, więc pozostawiamy k bez zmian.
+
+Ostatecznie: 
+```{r zestawienie_knn_rozne_modele, results='asis'}
+
+# Zestawienie dokladnosci dla obu modeli
+dokladnosc_knn_podzbiory <- data.frame(
+  "model" = c("model1","model2", "model3"),
+  "cross-validation" =  c(wyniki_1_k$cross.knn$error,wyniki_2_k$cross.knn$error, wyniki_3_k$cross.knn$error),
+  "bootstrap" = c(wyniki_1_k$boot.knn$error,wyniki_2_k$boot.knn$error, wyniki_3_k$boot.knn$error),
+  ".632+" = c(wyniki_1_k$plus.knn$error,wyniki_2_k$plus.knn$error, wyniki_3_k$plus.knn$error)
+)
+
+tabela_xtable <- xtable(
+  dokladnosc_knn_podzbiory,
+  caption = "Dokładność klasyfikacji metodą k-NN dla różnych podzbiorów zmiennych i k = 5",
+  label = "tab:zestaw_dokl_modele_knn",
+  align = c("c", "c", "c","c","c")  
+)
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",      
+      size = "normalsize",
+      comment = FALSE,
+      digits = c(0, 0, 0,0,0),
+      sanitize.colnames.function = function(x){
+        c("model", "cross-validation","bootstrap",".632+")
+      })
+
+```
+
+Wykorzystując liczbę sąsiadów k = 5 i model 3 uzyskujemy najniższy błąd klasyfikacji dla wszystkich zastosowanych schematów.
+
+### Naiwny klasyfikator bayesowski
+
+W przypadku naiwnego klasyfikatora bayesowskiego porównamy go dla 3 różnych podzbiorów, które określiliśmy wcześniej. Co ciekawe podzbiór najlepszy dla k-NN daje największy błąd przy użyciu "bayesa".
+
+```{r podzbiory bayes}
+# KNN na podzbiorze
+
+my.predict  <- function(model, newdata) {
+  preds <- predict(model, newdata = newdata, type = "class")
+  factor(preds, levels = levels(newdata$Class)) 
+}
+
+my.nb <- function(formula1, data1) {
+  naiveBayes(formula = formula1, data = data1)
+}
+
+wielokrotny.b <- function(model) {
+  # porównanie błędów klasyfikacji: cv, boot, .632plus
+  cross.b <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.nb,
+    predict = my.predict,
+    estimator = "cv",
+    est.para = control.errorest(k = 10),
+  )
+  boot.b <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.nb,
+    predict = my.predict,
+    estimator = "boot",
+    est.para = control.errorest(nboot = 50),
+  )
+  plus.b <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.nb,
+    predict = my.predict,
+    estimator = "632plus",
+    est.para = control.errorest(nboot = 50),
+  )
+  return(list(cross.b = cross.b, boot.b = boot.b, plus.b = plus.b))
+}
+```
+
+```{r wybor_podzbiorow_bayes}
+model1_b=(Class ~ Comp + D.Circ + Elong + Scat.Ra + Holl.Ra)
+model2_b=(Class ~ Comp + Circ + D.Circ + Scat.Ra + Elong + Holl.Ra +Max.L.Ra + Sc.Var.maxis+ Max.L.Rect)
+model3_b=(Class ~ Comp + Circ + D.Circ+ Pr.Axis.Ra + Scat.Ra + Elong +Max.L.Ra + Sc.Var.maxis+ Max.L.Rect+ Pr.Axis.Rect +Ra.Gyr)
+
+
+wynik1_b <- wielokrotny.b(model1_b)
+wynik2_b <- wielokrotny.b(model2_b)
+wynik3_b <- wielokrotny.b(model3_b)
+
+```
+
+
+
+
+```{r zestawienie_bayes_rozne_modele, results='asis'}
+
+# Zestawienie dokladnosci dla obu modeli
+dokladnosc_bayes_podzbiory <- data.frame(
+  "model" = c("model1","model2", "model3"),
+  "cross-validation" =  c(wynik1_b$cross.b$error,wynik2_b$cross.b$error, wynik3_b$cross.b$error),
+  "bootstrap" = c(wynik1_b$boot.b$error,wynik2_b$boot.b$error, wynik3_b$boot.b$error),
+  ".632+" = c(wynik1_b$plus.b$error,wynik2_b$plus.b$error, wynik3_b$plus.b$error)
+)
+
+tabela_xtable <- xtable(
+  dokladnosc_bayes_podzbiory,
+  caption = "Dokładność klasyfikacji metodą naiwnego klasyfikatora Bayesowskiego \n dla różnych podzbiorów zmiennych",
+  label = "tab:zestaw_dokl_modele_b",
+  align = c("c", "c", "c","c","c")  
+)
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",      
+      size = "normalsize",
+      comment = FALSE,
+      digits = c(0, 0, 0,0,0),
+      sanitize.colnames.function = function(x){
+        c("model", "cross-validation","bootstrap",".632+")
+      })
+
+```
+
+
+
+### Drzewa klasyfikacyjne
+
+Najpierw sprawdzamy jak zmienia się błąd w zależności od wybranego podzbioru (parametr `cp = 0.01` bez zmian)
+
+```{r podzbiory drzewa}
+
+my.predict  <- function(model, newdata) {
+  preds <- predict(model, newdata = newdata, type = "class")
+  factor(preds, levels = levels(newdata$Class)) 
+}
+
+my.rpart.full <- function(formula, data, ...) {
+  rpart(formula, data = data, method = "class", cp = 0.01)
+}
+
+wielokrotny.tree <- function(model) {
+  # porównanie błędów klasyfikacji: cv, boot, .632plus
+  cross.tree <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.rpart.full,
+    predict = my.predict,
+    estimator = "cv",
+    est.para = control.errorest(k = 10),
+  )
+  boot.tree <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.rpart.full,
+    predict = my.predict,
+    estimator = "boot",
+    est.para = control.errorest(nboot = 50),
+  )
+  plus.tree <- errorest(
+    model,
+    Vehicle_scaled,
+    model = my.rpart.full,
+    predict = my.predict,
+    estimator = "632plus",
+    est.para = control.errorest(nboot = 50),
+  )
+  return(list(cross.tree = cross.tree, boot.tree = boot.tree, plus.tree = plus.tree))
+}
+
+```
+
+```{r wybor_podzbiorow_drzewa}
+model1_tree=(Class ~ Comp + D.Circ + Elong + Scat.Ra + Holl.Ra)
+model2_tree=(Class ~ Comp + Circ + D.Circ + Scat.Ra + Elong + Holl.Ra +Max.L.Ra + Sc.Var.maxis+ Max.L.Rect)
+model3_tree=(Class ~ Comp + Circ + D.Circ+ Pr.Axis.Ra + Scat.Ra + Elong +Max.L.Ra + Sc.Var.maxis+ Max.L.Rect+ Pr.Axis.Rect +Ra.Gyr)
+
+
+wynik1_tree <- wielokrotny.tree(model1_tree)
+wynik2_tree <- wielokrotny.tree(model2_tree)
+wynik3_tree <- wielokrotny.tree(model3_tree)
+
+```
+
+```{r zestawienie_drzewa_rozne_modele, results='asis'}
+
+# Zestawienie dokladnosci dla obu modeli
+dokladnosc_drzewa_podzbiory <- data.frame(
+  "model" = c("model1","model2" ,"model3"),
+  "cross-validation" =  c(wynik1_tree$cross.tree$error,wynik2_tree$cross.tree$error, wynik3_tree$cross.tree$error),
+  "bootstrap" = c(wynik1_tree$boot.tree$error,wynik2_tree$boot.tree$error, wynik3_tree$boot.tree$error),
+  ".632+" = c(wynik1_tree$plus.tree$error,wynik2_tree$plus.tree$error, wynik3_tree$plus.tree$error)
+)
+
+tabela_xtable <- xtable(
+  dokladnosc_drzewa_podzbiory,
+  caption = "Dokładność klasyfikacji metodą drzew klasyfikacyjnych \n dla różnych podzbiorów zmiennych",
+  label = "tab:zestaw_dokl_modele_drzewa",
+  align = c("c", "c", "c","c","c")  
+)
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",      
+      size = "normalsize",
+      comment = FALSE,
+      digits = c(0, 0, 3, 3, 3),
+      sanitize.colnames.function = function(x){
+        c("model", "cross-validation","bootstrap",".632+")
+      })
+
+```
+
+
+Model 3 jest najskuteczniejszy podobnie jak w k-NN. Jednak tym razem nie poprawia on wyniku względem całego zbioru, błąd pozostaje podobny.
+
+
+W drzewie klasyfikacyjnym możemy również sprawdzić jak jego rozmiar wpływa na błąd.
+Będziemy tutaj wykorzystywać podzbiór o nazwie model 3.
+
+```{r cp_1se_wykres, fig.height=4 ,fig.cap="Zależność błędu klasyfikacji od rozmiaru drzewa (opartego na modelu 3)"}
+
+tree_model <- rpart(model3, data = train_set, method = "class", cp = 0.01)
+
+xerror.min <- min(tree_model$cptable[,"xerror"])
+xstd.min <- tree_model$cptable[which.min(tree_model$cptable[,"xerror"]),"xstd"]
+
+# Największe cp spełniające regułę 1-SE
+cp.1se <- max(tree_model$cptable[tree_model$cptable[,"xerror"] <= xerror.min + xstd.min, "CP"])
+
+cp_table <- as.data.frame(tree_model$cptable)
+cp_table$size <- cp_table$nsplit + 1  # liczba liści
+
+pruned_tree <- prune(tree_model, cp = cp.1se)
+
+ggplot(cp_table, aes(x = nsplit + 1, y = xerror)) +
+  geom_point(aes(size = CP), color = "steelblue") +
+  geom_line() +
+  geom_errorbar(aes(ymin = xerror - xstd, ymax = xerror + xstd), 
+                width = 0.5, color = "gray50") +
+  geom_hline(yintercept = xerror.min + xstd.min, 
+             linetype = "dashed", color = "red") +
+  geom_vline(xintercept = cp_table[cp_table$CP == cp.1se, "nsplit"] + 1, 
+             linetype = "dotted", color = "blue") +
+  scale_x_continuous(breaks = cp_table$nsplit + 1, 
+                    labels = cp_table$size) +
+  labs(
+    title = "Optymalizacja rozmiaru drzewa decyzyjnego przy użyciu reguły 1-SE",
+    x = "Rozmiar drzewa",
+    y = "Wartość względnego błędu",
+    caption = paste0(
+      "<span style='color:red;'>---</span> górna granica reguły 1-SE \n",
+      "<span style='color:blue;'>...</span> wybrany model"
+    ) # z biblioteki ggtext
+  ) +
+  theme_minimal() +
+  theme(plot.caption = element_textbox_simple())
+```
+
+
+```{r nsplit,echo=FALSE,results='hide'}
+se_threshold <- xerror.min + xstd.min
+cp_table[cp_table[,"xerror"] <= se_threshold, c("nsplit", "xerror", "xstd")]
+rozmiar_drzewa <- sum(pruned_tree$frame$var == "<leaf>")
+```
+
+
+```{r drzewo_przyciete_wykres, fig.cap="\\label{fig:drzewo_przyciete_wyk} Wizualizacja drzewa z podstawowymi parametrami po przycięciu",fig.height=4}
+rozmiar_drzewa <- sum(pruned_tree$frame$var == "<leaf>")
+
+rpart.plot(pruned_tree, 
+           main = paste("Przycięte drzewo (cp=cp_1se) dla modelu 3, rozmiar =",rozmiar_drzewa),
+           box.palette = "Greens",
+           shadow.col = "gray",
+           nn = TRUE,
+           extra = 101,
+           tweak = 1.1)
+
+```
+
+
+Wybieramy rozmiar drzewa równy `r rozmiar_drzewa` (czyli nsplit = `r rozmiar_drzewa-1`), ponieważ jest to najmniejszy możliwy rozmiar drzewa, którego błąd walidacji krzyżowej mieści się w granicy wyznaczonej przez regułę 1-SE, czyli minimum błędu + odchylenie standardowe. Taki wybór pozwala uniknąć przeuczenia i zapewnia lepszą zdolność uogólniania niż bardziej złożone drzewa o podobnym błędzie.
+
+
+
+```{r wielokrotne drzewo przycięte}
+
+# Funkcja do budowy drzewa z metodą 1SE
+my.rpart.1se <- function(formula, data, ...) {
+  full_tree <- rpart(formula, data = data, method = "class", cp = 0.01)
+  cp_table <- tree_model$cptable
+  min_row <- which.min(cp_table[, "xerror"])
+  xerror_min <- cp_table[min_row, "xerror"]
+  xstd_min <- cp_table[min_row, "xstd"]
+  se_threshold <- xerror_min + xstd_min
+  cp_1se <- max(cp_table[cp_table[, "xerror"] <= se_threshold, "CP"])
+  prune(full_tree, cp = cp_1se)
+}
+
+# Funkcja do predykcji klas
+my.rpart.predict <- function(object, newdata) {
+  predict(object, newdata = newdata, type = "class")
+}
+
+wielokrotny.tree.prune <- function(model){
+  cross.tree <- errorest(Class ~ ., data = Vehicle_scaled,
+                           model = my.rpart.1se,
+                           predict = my.rpart.predict,
+                           estimator = "cv",
+                           est.para = control.errorest(k = 10))
+
+  # Bootstrap
+  boot.tree <- errorest(Class ~ ., data = Vehicle_scaled,
+                          model = my.rpart.1se,
+                          predict = my.rpart.predict,
+                          estimator = "boot",
+                          est.para = control.errorest(nboot = 50))
+
+  # .632plus
+  plus.tree <- errorest(Class ~ ., data = Vehicle_scaled,
+                          model = my.rpart.1se,
+                          predict = my.rpart.predict,
+                          estimator = "632plus",
+                          est.para = control.errorest(nboot = 50))
+  return(list(cross.tree = cross.tree, boot.tree = boot.tree, plus.tree = plus.tree))
+
+}
+
+wynik1_tree <- wielokrotny.tree.prune(model1_tree)
+wynik2_tree <- wielokrotny.tree.prune(model2_tree)
+wynik3_tree <- wielokrotny.tree.prune(model3_tree)
+```
+
+```{r tabela drzewo pruned , results='asis'}
+# Zestawienie dokladnosci dla obu modeli
+dokladnosc_drzewa_podzbiory <- data.frame(
+  "model" = c("model1","model2" ,"model3"),
+  "cross-validation" =  c(wynik1_tree$cross.tree$error,wynik2_tree$cross.tree$error, wynik3_tree$cross.tree$error),
+  "bootstrap" = c(wynik1_tree$boot.tree$error,wynik2_tree$boot.tree$error, wynik3_tree$boot.tree$error),
+  ".632+" = c(wynik1_tree$plus.tree$error,wynik2_tree$plus.tree$error, wynik3_tree$plus.tree$error)
+)
+
+tabela_xtable <- xtable(
+  dokladnosc_drzewa_podzbiory,
+  caption = "Dokładność klasyfikacji metodą drzew klasyfikacyjnych \n dla różnych podzbiorów zmiennych",
+  label = "tab:zestaw_dokl_modele_drzewa_pruned",
+  align = c("c", "c", "c","c","c")  
+)
+
+print(tabela_xtable,
+      include.rownames = FALSE,
+      caption.placement = "top",
+      table.placement="H",      
+      size = "normalsize",
+      comment = FALSE,
+      digits = c(0, 0, 3, 3, 3),
+      sanitize.colnames.function = function(x){
+        c("model", "cross-validation","bootstrap",".632+")
+      })
+
+```
+
+
+Co ciekawe po przycięciu wyniki są podobne dla wszystkich trzech modeli. Błąd przed przycięciem dla całego zbioru uzyskany metodą `.632+` wynosił `r round(100 * plus.tree$error, 1)`%, a po przycięciu i po użyciu podzbioru (model 3) uzyskujemy wynik `r round(100*wynik3_tree$plus.tree$error,1)`%, który nie jest dużo gorszy, a czytelność drzewa jak i zdolność generalizacji mogły się poprawić. Jest to akceptowalny kompromis między złożonością a skutecznością.
+
+
+## Podsumowanie
+
+*Dla jakiego podzbioru zmiennych predykcyjnych i dla jakich parametrów poszczególnych
+metod otrzymujemy najlepsze wyniki?*
+
+* Podzbiór wyznaczony metodą prób i błędów "model 3" daje najlepszy wynik dla `k-NN` i `drzew klasyfikacyjnych`, ale dla `naiwnego klasyfikatora bayesowskiego` błąd nieznacznie się zwiększa. 
+
+* W metodzie `k-NN` dla modelu 3 najlepiej użyć k = 5 sąsiadów.
+
+* Drzewo klasyfikacyjne dobrze jest przyciąć, żeby było czytelniejsze, do rozmiaru `r rozmiar_drzewa`, ale nieznacznie zwiększa to błąd. Najlepszy wynik uzyskaliśmy bez przycinania.
+
+
+*Która z metod klasyfikacyjnych daje lepsze, a które gorsze rezultaty w przypadku analizowanych danych?*
+
+* W przypadku danych `Vehicle` metoda `naiwnego klasyfikatora bayesowskiego` daje najgorsze rezultaty.
+
+* Metoda `k-NN` po znalezieniu odpowiedniego podzbioru daje najlepszy wynik `r round(100*wyniki_3_k$plus.knn$error,1)`% (sprawdzany metodą `.632+`). 
+
+* Drzewo klasyfikacyjne jest niewiele gorsze od `k-NN`, daje nawet wynik: `r round(100*wynik3_tree$plus.tree$error,1)`% (sprawdzany metodą `.632+`) być może gdybyśmy sprawdzili inne kombinacje zmiennych w podzbiorach to ta metoda mogłaby być lepsza od `k-NN`.
+
+
+*Czy wybór schematu oceny dokładności miał istotny wpływ na wnioski dotyczące skuteczności metod?*
+
+Chociaż metoda bootstrap często zawyża błąd, a .632+ daje najbardziej optymistyczne wyniki, to stosowanie różnych technik walidacji jest uzasadnione. Każda z nich ocenia model z innej perspektywy, dzięki czemu porównania między klasyfikatorami są bardziej wiarygodne i odporne na przypadkowość pojedynczego oszacowania. Różne metody mają różne właściwości i mogą inaczej oceniać błąd, więc pokazanie ich wszystkich jest cenne. Uwzględnienie trzech schematów pozwala na bardziej zrównoważoną ocenę skuteczności klasyfikatora i zwiększa wiarygodność porównań między modelami.
+
+*Spostrzeżenia*
+
+* Opel jak i Saab są najtrudniejsze do rozróżnienia nawet po dobraniu odpowienich parametrów w najskuteczniejszej metodzie `k-NN`. Wynika to oczywiście z podobieństwa kształtu tych pojazdów. Prawdopodobine potrzebowalibyśmy dużo więcej danych lub bardziej zaawansowanego algorytmu aby rozróżnić tak podobne pojazdy. Bus piętrowy i Van są dużo łatwiejsze do odróżnienia. Na macierzach pomyłek możemy zaobserwować, że są bardzo skutecznie sklasyfikowane. Co więcej Van jest na tyle odrębny, że nawet Naive Bayes potrafi dobrze odróżnić Vana od pozostałych pojazdów.
+
+* W analizie zbioru `Vehicle` najlepiej sprawdził się algorytm `k-NN` z odpowiednio dobranym podzbiorem cech (`model 3`). Natomiast `naiwny klasyfikator bayesowski` wykazał się niską skutecznością, co może wskazywać na silne współzależności cech.
+
+* Warto zauważyć, że wybór cech na podstawie ANOVA i wykresów skrzypcowych nie zawsze prowadzi do najlepszego podzbioru.
